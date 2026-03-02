@@ -87,105 +87,87 @@ Namespace MacroAutoControl
         End Function
 
         ''' <summary>
-        ''' 내 기물 주변에 빛남(하이라이트) 효과가 있는지 감지
-        ''' 내 차례이면 기물 주변이 빛남 → True, 상대방 차례이면 빛남 없음 → False
+        ''' BoardRecognizer.DetectHighlightedPiece를 사용하여 내 차례인지 판정.
+        ''' 하이라이트된 기물이 상대 기물이면 → 내 차례 (True)
+        ''' 하이라이트된 기물이 내 기물이면 → 상대 차례 (False)
+        ''' 하이라이트 없으면 → 내 차례 (첫 수 등)
         ''' </summary>
-        ''' <summary>
-        ''' Mat에서 특정 픽셀의 최대 밝기(B,G,R 중 최댓값) 반환
-        ''' </summary>
-        Private Shared Function GetPixelBrightness(mat As Mat, x As Integer, y As Integer) As Integer
-            If x < 0 OrElse x >= mat.Cols OrElse y < 0 OrElse y >= mat.Rows Then Return 0
-            Dim pixel(2) As Byte
-            Marshal.Copy(mat.Data + (y * CInt(mat.Step()) + x * 3), pixel, 0, 3)
-            Return Math.Max(Math.Max(CInt(pixel(0)), CInt(pixel(1))), CInt(pixel(2)))
-        End Function
+        Private Function HasGlowAroundMyPieces(mat As Mat, board As Board, gridPos As Integer()(), mySide As String, cellW As Integer, cellH As Integer, boardFlipped As Boolean, targetWindow As WindowFinder.WindowInfo, Optional ByRef glowPieceName As String = Nothing) As Boolean
+            Dim recognizer = GetRecognizer()
+            Dim highlighted = recognizer.DetectHighlightedPiece(mat, board)
 
-        ''' <summary>
-        ''' HSV 기반 기물 주변 빛남 픽셀 수 측정
-        ''' 보드 바닥색: H20~24, S90~135, V200~218
-        ''' 빛남 효과: 보드보다 밝은 노란/금색 (H:15~30, S>50, V>220)
-        ''' </summary>
-        Private Function CountGlowPixels(hsv As Mat, cx As Integer, cy As Integer, radii As Integer()) As Integer
-            Dim glowCount = 0
-            For Each radius In radii
-                Dim cos45 = CInt(radius * 0.707)
-                Dim dx = New Integer() {radius, cos45, 0, -cos45, -radius, -cos45, 0, cos45}
-                Dim dy = New Integer() {0, cos45, radius, cos45, 0, -cos45, -radius, -cos45}
-                For i = 0 To 7
-                    Dim px = cx + dx(i)
-                    Dim py = cy + dy(i)
-                    If px < 0 OrElse px >= hsv.Cols OrElse py < 0 OrElse py >= hsv.Rows Then Continue For
-                    Dim pixel(2) As Byte
-                    Marshal.Copy(hsv.Data + (py * CInt(hsv.Step()) + px * 3), pixel, 0, 3)
-                    Dim h = CInt(pixel(0)), s = CInt(pixel(1)), v = CInt(pixel(2))
-                    ' 빛남 효과: 노란~금색 (H:15~30) + 채도 있음 + 보드보다 밝음 (V>220)
-                    If h >= 15 AndAlso h <= 30 AndAlso s > 50 AndAlso v > 220 Then
-                        glowCount += 1
-                    End If
-                Next
-            Next
-            Return glowCount
-        End Function
-
-        Private Function HasGlowAroundMyPieces(mat As Mat, board As Board, gridPos As Integer()(), mySide As String, cellW As Integer, cellH As Integer, boardFlipped As Boolean, Optional ByRef glowPieceName As String = Nothing) As Boolean
-            Dim myPrefix = If(mySide = Constants.CHO, "C", "H")
-            Dim enemyPrefix = If(mySide = Constants.CHO, "H", "C")
-
-            ' 기물 바깥쪽 빛남 감지: 셀 크기의 55%~75% 범위
-            Dim baseSize = Math.Max(cellW, cellH)
-            Dim radii = New Integer() {
-                CInt(baseSize * 0.55),
-                CInt(baseSize * 0.65),
-                CInt(baseSize * 0.75)
-            }
-            For ri = 0 To radii.Length - 1
-                If radii(ri) < 24 Then radii(ri) = 24 + ri * 6
-            Next
-
-            ' BGR → HSV 변환
-            Dim hsv As New Mat()
-            Cv2.CvtColor(mat, hsv, ColorConversionCodes.BGR2HSV)
-
-            ' 각 기물의 빛남 픽셀 수 측정
-            Dim myMaxGlow = 0, myMaxPiece = ""
-            Dim enemyMaxGlow = 0, enemyMaxPiece = ""
-
-            For r = 0 To BOARD_ROWS - 1
-                For c = 0 To BOARD_COLS - 1
-                    Dim piece = board.Grid(r)(c)
-                    If piece = Constants.EMPTY Then Continue For
-                    Dim screenR = If(boardFlipped, 9 - r, r)
-                    Dim idx = screenR * BOARD_COLS + c
-                    Dim cx = gridPos(idx)(0)
-                    Dim cy = gridPos(idx)(1)
-                    Dim glow = CountGlowPixels(hsv, cx, cy, radii)
-
-                    If piece.StartsWith(myPrefix) Then
-                        If glow > myMaxGlow Then myMaxGlow = glow : myMaxPiece = $"{piece}({r},{c})"
-                    ElseIf piece.StartsWith(enemyPrefix) Then
-                        If glow > enemyMaxGlow Then enemyMaxGlow = glow : enemyMaxPiece = $"{piece}({r},{c})"
-                    End If
-                Next
-            Next
-            hsv.Dispose()
-
-            ' 빛남 판정 기준: 24개 샘플 중 3개 이상이면 빛남
-            Dim glowMin = 3
-
-            ' 1. 내 기물 중 빛남 있으면 → 상대 차례 (대기)
-            If myMaxGlow >= glowMin Then
-                Return False
+            If highlighted Is Nothing Then
+                ' 빛남 없음: 초(선공)이면 내 차례, 한(후공)이면 대기
+                If mySide = Constants.CHO Then
+                    glowPieceName = "빛남없음(초선공)"
+                    Return True
+                Else
+                    glowPieceName = "빛남없음(한후공대기)"
+                    Return False
+                End If
             End If
 
-            ' 2. 상대 기물 중 빛남 있으면 → 내 차례
-            If enemyMaxGlow >= glowMin Then
-                glowPieceName = $"상대빛남:{enemyMaxPiece} glow={enemyMaxGlow}"
+            Dim hlSide = highlighted.Value.Side
+            Dim hlGlow = highlighted.Value.GlowCount
+            Dim piece = board.Grid(highlighted.Value.Row)(highlighted.Value.Col)
+            Dim pieceName = If(BoardRecognizer.PIECE_NAMES.ContainsKey(piece), BoardRecognizer.PIECE_NAMES(piece), piece)
+
+            If hlSide = mySide Then
+                ' 내 기물이 하이라이트 → 1초 후 재캡처하여 재검사
+                Thread.Sleep(1000)
+                If _cancelRequested Then Return False
+
+                Dim ss2 = WindowFinder.CaptureWindow(targetWindow.Handle)
+                If ss2 Is Nothing Then
+                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재캡처실패)"
+                    Return False
+                End If
+
+                Dim mat2 As Mat = Nothing
+                Try
+                    mat2 = BitmapConverter.ToMat(ss2)
+                    If mat2.Channels() = 4 Then
+                        Dim bgr2 As New Mat()
+                        Cv2.CvtColor(mat2, bgr2, ColorConversionCodes.BGRA2BGR)
+                        mat2.Dispose()
+                        mat2 = bgr2
+                    End If
+                Catch
+                    ss2.Dispose()
+                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재캡처오류)"
+                    Return False
+                End Try
+
+                Dim board2 = recognizer.GetBoardState(mat2)
+                If board2 Is Nothing Then
+                    mat2.Dispose() : ss2.Dispose()
+                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재인식실패)"
+                    Return False
+                End If
+
+                Dim hl2 = recognizer.DetectHighlightedPiece(mat2, board2)
+                mat2.Dispose() : ss2.Dispose()
+
+                If hl2 Is Nothing Then
+                    glowPieceName = $"내빛남→재검사:빛남없음"
+                    If mySide = Constants.CHO Then Return True Else Return False
+                End If
+
+                Dim piece2 = board2.Grid(hl2.Value.Row)(hl2.Value.Col)
+                Dim name2 = If(BoardRecognizer.PIECE_NAMES.ContainsKey(piece2), BoardRecognizer.PIECE_NAMES(piece2), piece2)
+
+                If hl2.Value.Side = mySide Then
+                    glowPieceName = $"내빛남(재확인):{name2} glow={hl2.Value.GlowCount}"
+                    Return False
+                Else
+                    glowPieceName = $"내빛남→상대빛남:{name2} glow={hl2.Value.GlowCount}"
+                    Return True
+                End If
+            Else
+                ' 상대 기물이 하이라이트 → 상대가 마지막에 둔 수 → 내 차례
+                glowPieceName = $"상대빛남:{pieceName}({highlighted.Value.Row},{highlighted.Value.Col}) glow={hlGlow}"
                 Return True
             End If
-
-            ' 3. 양쪽 모두 빛남 없음 → 내 차례 (첫 수 등)
-            glowPieceName = $"양쪽무빛 my={myMaxGlow} enemy={enemyMaxGlow}"
-            Return True
         End Function
 
         ''' <summary>
@@ -268,23 +250,15 @@ Namespace MacroAutoControl
                     Continue While
                 End If
 
-                ' 진영 자동 감지
-                ' 보드가 뒤집혔으면 원래 화면에서 한(HAN)이 아래에 있었으므로 내 진영 = 한
+                ' 진영 자동 감지: 하단 궁의 실제 색상(HSV)으로 판단
                 Dim mySide = item.AISide
                 If mySide = "AUTO" Then
-                    If recognizer.IsBoardFlipped Then
-                        mySide = Constants.HAN
+                    Dim detectedSide = recognizer.DetectMySideByBottomKingColor(mat)
+                    If detectedSide IsNot Nothing Then
+                        mySide = detectedSide
                     Else
-                        For r = 7 To 9
-                            For c = 3 To 5
-                                Dim p = board.Grid(r)(c)
-                                If p = Constants.CK Then mySide = Constants.CHO : Exit For
-                                If p = Constants.HK Then mySide = Constants.HAN : Exit For
-                            Next
-                            If mySide <> "AUTO" Then Exit For
-                        Next
+                        mySide = Constants.CHO
                     End If
-                    If mySide = "AUTO" Then mySide = Constants.CHO
                 End If
                 Dim dbgSide = If(mySide = Constants.CHO, "초", "한")
                 RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
@@ -295,7 +269,7 @@ Namespace MacroAutoControl
                 Dim gridPos = recognizer.GetGridPositions()
                 Dim cellSize = recognizer.GetCellSize()
                 Dim glowPiece As String = Nothing
-                If gridPos IsNot Nothing AndAlso HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, glowPiece) Then
+                If gridPos IsNot Nothing AndAlso HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, targetWindow, glowPiece) Then
                     ' 내 차례 감지! 스크린샷 저장
                     If _watchDir IsNot Nothing Then
                         Try
@@ -384,7 +358,8 @@ Namespace MacroAutoControl
                                targetWindow As WindowFinder.WindowInfo,
                                ownerForm As Form,
                                useBackground As Boolean,
-                               Optional repeatCount As Integer = 1)
+                               Optional repeatCount As Integer = 1,
+                               Optional initialStartIndex As Integer = 0)
             If items.Count = 0 Then
                 RaiseEvent MacroCompleted(False, "매크로 항목이 없습니다.")
                 Return
@@ -434,7 +409,7 @@ Namespace MacroAutoControl
             For idx = 0 To items.Count - 1
                 If items(idx).IsAI Then firstAIIndex = idx : Exit For
             Next
-            Dim startIndex = 0  ' 첫 실행은 처음부터
+            Dim startIndex = Math.Max(0, Math.Min(initialStartIndex, items.Count - 1))
 
             Try
                 While infinite OrElse currentRepeat < totalRepeat

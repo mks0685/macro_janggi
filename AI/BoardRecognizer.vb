@@ -290,6 +290,43 @@ Namespace MacroAutoControl.Capture
             Return row
         End Function
 
+        ''' <summary>
+        ''' 화면 하단 궁의 HSV 색상으로 내 진영 판단.
+        ''' 하단 궁 영역(row 8~9, col 3~5)의 실제 픽셀 색상을 검사.
+        ''' 빨강이면 CHO, 파랑/녹색이면 HAN.
+        ''' </summary>
+        Public Function DetectMySideByBottomKingColor(image As Mat) As String
+            If _gridPositions Is Nothing Then Return Nothing
+
+            ' 화면 하단 = 정규화된 row 8~9 (뒤집혔으면 screenR = 9-r, 아니면 r 그대로)
+            ' 화면 하단 궁 위치: screenRow 8~9, col 3~5
+            For screenR = 9 To 8 Step -1
+                For c = 3 To 5
+                    Dim idx = screenR * BOARD_COLS + c
+                    If idx < 0 OrElse idx >= _gridPositions.Length Then Continue For
+                    Dim cx = _gridPositions(idx)(0)
+                    Dim cy = _gridPositions(idx)(1)
+
+                    Dim half = 26
+                    If _cellSize.Item1 > 0 Then
+                        half = Math.Max(26, CInt(Math.Min(_cellSize.Item1, _cellSize.Item2) * 0.45))
+                    End If
+
+                    Dim imgH = image.Rows, imgW = image.Cols
+                    Dim x1 = Math.Max(0, cx - half)
+                    Dim y1 = Math.Max(0, cy - half)
+                    Dim x2 = Math.Min(imgW, cx + half)
+                    Dim y2 = Math.Min(imgH, cy + half)
+                    If x2 <= x1 OrElse y2 <= y1 Then Continue For
+
+                    Dim cellImg = image(New OpenCvSharp.Rect(x1, y1, x2 - x1, y2 - y1))
+                    Dim color = DetectCellColor(cellImg)
+                    If color IsNot Nothing Then Return color
+                Next
+            Next
+            Return Nothing
+        End Function
+
         Public Function GetGridPositions() As Integer()()
             Return _gridPositions
         End Function
@@ -379,7 +416,10 @@ Namespace MacroAutoControl.Capture
                     bestMatch = kvp.Key
                 End If
             Next
-            If bestScore >= 0.7 Then Return bestMatch
+            If bestScore >= 0.7 Then
+                bestMatch = VerifyColorSide(cellImage, bestMatch)
+                Return bestMatch
+            End If
 
             For Each scale In {0.88, 0.94, 1.06, 1.12}
                 For Each kvp In _templates
@@ -398,7 +438,10 @@ Namespace MacroAutoControl.Capture
                     End If
                 Next
             Next
-            If bestScore >= 0.65 Then Return bestMatch
+            If bestScore >= 0.65 Then
+                bestMatch = VerifyColorSide(cellImage, bestMatch)
+                Return bestMatch
+            End If
 
             Dim cellGray As New Mat()
             Cv2.CvtColor(cellImage, cellGray, ColorConversionCodes.BGR2GRAY)
@@ -438,6 +481,28 @@ Namespace MacroAutoControl.Capture
             End If
 
             Return bestMatch
+        End Function
+
+        ''' <summary>
+        ''' 템플릿 매칭 결과의 진영을 HSV 색상으로 검증하고, 불일치 시 교차 진영으로 교정.
+        ''' 궁(K)/졸(J)/병(B)은 고유 기물이므로 교정 대상이 아님.
+        ''' </summary>
+        Private Function VerifyColorSide(cellImage As Mat, matchedPiece As String) As String
+            If matchedPiece = EMPTY Then Return matchedPiece
+
+            ' 궁/졸/병은 진영 교차 매핑이 없으므로 그대로 반환
+            Dim cross As String = Nothing
+            If Not _crossSideMap.TryGetValue(matchedPiece, cross) Then Return matchedPiece
+
+            Dim cellColor = DetectCellColor(cellImage)
+            If cellColor Is Nothing Then Return matchedPiece  ' 색상 판별 불가 시 그대로
+
+            Dim matchedSide As String = Nothing
+            _pieceSide.TryGetValue(matchedPiece, matchedSide)
+            If matchedSide <> cellColor Then
+                Return cross
+            End If
+            Return matchedPiece
         End Function
 
         Public Function GetBoardState(image As Mat) As Board
@@ -670,14 +735,61 @@ Namespace MacroAutoControl.Capture
         ' ───── 하이라이트 감지 ─────
 
         ''' <summary>
-        ''' 보드에서 가장 밝은 테두리를 가진 기물의 위치와 진영을 반환.
-        ''' 카카오장기에서 마지막 착수 기물에 밝은 하이라이트가 표시됨.
+        ''' HSV 기반으로 기물 주변의 금색 빛남 픽셀 수를 측정.
+        ''' 링 영역(innerR ~ outerR)을 촘촘하게 샘플링하여 정확도 향상.
         ''' </summary>
-        Public Function DetectHighlightedPiece(image As Mat, board As Board) As (Row As Integer, Col As Integer, Side As String)?
+        Private Function CountRingGlowPixels(hsv As Mat, cx As Integer, cy As Integer,
+                                              innerR As Integer, outerR As Integer) As Integer
+            Dim glowCount = 0
+            Dim imgH = hsv.Rows, imgW = hsv.Cols
+
+            ' 링 영역을 2px 간격으로 촘촘하게 샘플링
+            For dy = -outerR To outerR Step 2
+                For dx = -outerR To outerR Step 2
+                    Dim dist = Math.Sqrt(dx * dx + dy * dy)
+                    If dist < innerR OrElse dist > outerR Then Continue For
+
+                    Dim px = cx + dx
+                    Dim py = cy + dy
+                    If px < 0 OrElse px >= imgW OrElse py < 0 OrElse py >= imgH Then Continue For
+
+                    Dim pixel(2) As Byte
+                    Runtime.InteropServices.Marshal.Copy(
+                        hsv.Data + (py * CInt(hsv.Step()) + px * 3), pixel, 0, 3)
+                    Dim h = CInt(pixel(0)), s = CInt(pixel(1)), v = CInt(pixel(2))
+
+                    ' 빛남 효과: 노란~금색 (H:15~35) + 채도 있음(S>40) + 밝음(V>200)
+                    If h >= 15 AndAlso h <= 35 AndAlso s > 40 AndAlso v > 200 Then
+                        glowCount += 1
+                    End If
+                Next
+            Next
+            Return glowCount
+        End Function
+
+        ''' <summary>
+        ''' 보드에서 금색 빛남 효과가 가장 강한 기물의 위치와 진영을 반환.
+        ''' 카카오장기에서 마지막 착수 기물에 금색 하이라이트가 표시됨.
+        ''' HSV 색상 기반으로 정확하게 검출.
+        ''' </summary>
+        Public Function DetectHighlightedPiece(image As Mat, board As Board) As (Row As Integer, Col As Integer, Side As String, GlowCount As Integer)?
             If _gridPositions Is Nothing Then Return Nothing
 
-            Dim bestBrightness As Double = 0
+            ' BGR → HSV 변환
+            Dim hsv As New Mat()
+            Cv2.CvtColor(image, hsv, ColorConversionCodes.BGR2HSV)
+
+            ' 링 크기 계산 (기물 바깥 영역)
+            Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
+            If baseSize <= 0 Then baseSize = 60
+            Dim innerR = CInt(baseSize * 0.42)
+            Dim outerR = CInt(baseSize * 0.72)
+            If innerR < 18 Then innerR = 18
+            If outerR < 30 Then outerR = 30
+
+            Dim bestGlow = 0
             Dim bestRow = -1, bestCol = -1
+            Dim secondGlow = 0
 
             For r = 0 To BOARD_ROWS - 1
                 For c = 0 To BOARD_COLS - 1
@@ -688,49 +800,34 @@ Namespace MacroAutoControl.Capture
                     Dim cx = _gridPositions(idx)(0)
                     Dim cy = _gridPositions(idx)(1)
 
-                    ' 기물 주변 테두리 영역의 밝기 측정 (기물 바깥 링)
-                    Dim innerR = 20
-                    Dim outerR = 32
-                    If _cellSize.Item1 > 0 Then
-                        innerR = CInt(Math.Min(_cellSize.Item1, _cellSize.Item2) * 0.3)
-                        outerR = CInt(Math.Min(_cellSize.Item1, _cellSize.Item2) * 0.48)
-                    End If
+                    Dim glow = CountRingGlowPixels(hsv, cx, cy, innerR, outerR)
 
-                    Dim imgH = image.Rows, imgW = image.Cols
-                    Dim x1 = Math.Max(0, cx - outerR)
-                    Dim y1 = Math.Max(0, cy - outerR)
-                    Dim x2 = Math.Min(imgW, cx + outerR)
-                    Dim y2 = Math.Min(imgH, cy + outerR)
-                    If x2 <= x1 OrElse y2 <= y1 Then Continue For
-
-                    Dim region = image(New OpenCvSharp.Rect(x1, y1, x2 - x1, y2 - y1))
-                    Dim gray As New Mat()
-                    Cv2.CvtColor(region, gray, ColorConversionCodes.BGR2GRAY)
-
-                    ' 링 영역만 마스킹 (내부 원 제외, 외부 원 포함)
-                    Dim mask As New Mat(gray.Rows, gray.Cols, MatType.CV_8UC1, New Scalar(0))
-                    Dim center As New Point(cx - x1, cy - y1)
-                    Cv2.Circle(mask, center, outerR, New Scalar(255), -1)
-                    Cv2.Circle(mask, center, innerR, New Scalar(0), -1)
-
-                    Dim brightness = Cv2.Mean(gray, mask).Val0
-
-                    If brightness > bestBrightness Then
-                        bestBrightness = brightness
+                    If glow > bestGlow Then
+                        secondGlow = bestGlow
+                        bestGlow = glow
                         bestRow = r
                         bestCol = c
+                    ElseIf glow > secondGlow Then
+                        secondGlow = glow
                     End If
                 Next
             Next
+            hsv.Dispose()
 
-            If bestRow < 0 Then Return Nothing
+            ' 최소 빛남 임계값: 10픽셀 이상 + 2위 대비 2배 이상 차이
+            If bestRow < 0 OrElse bestGlow < 10 Then Return Nothing
+            If secondGlow > 0 AndAlso bestGlow < secondGlow * 2 Then
+                ' 1위와 2위 차이가 불분명하면 신뢰도 낮음 → 그래도 1위 반환 (임계값은 충족)
+                ' 단, 1위가 충분히 강하면 (20 이상) 그대로 반환
+                If bestGlow < 20 Then Return Nothing
+            End If
 
             Dim piece = board.Grid(bestRow)(bestCol)
             Dim side As String = Nothing
             If CHO_PIECES.Contains(piece) Then side = CHO
             If HAN_PIECES.Contains(piece) Then side = HAN
 
-            Return (bestRow, bestCol, side)
+            Return (bestRow, bestCol, side, bestGlow)
         End Function
 
         ' ───── 대기 화면 / 로비 감지 ─────

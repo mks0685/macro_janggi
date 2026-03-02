@@ -1268,7 +1268,8 @@ Namespace MacroAutoControl
             SetMacroRunningUI(True)
 
             Dim repeatCount = If(chkInfinite.Checked, 0, CInt(nudRepeatCount.Value))
-            _macroRunner.RunSequence(_macroItems, _targetWindow, Me, chkBackground.Checked, repeatCount)
+            Dim startIdx = If(lstMacro.SelectedIndex >= 0, lstMacro.SelectedIndex, 0)
+            _macroRunner.RunSequence(_macroItems, _targetWindow, Me, chkBackground.Checked, repeatCount, startIdx)
         End Sub
 
         Private Sub btnMacroStop_Click(sender As Object, e As EventArgs) Handles btnMacroStop.Click
