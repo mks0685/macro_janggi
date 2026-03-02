@@ -1,0 +1,10 @@
+# Build output
+bin/
+obj/
+
+# Screenshots
+*.png
+!templates/*.png
+
+# PowerShell scripts (utility)
+*.ps1
