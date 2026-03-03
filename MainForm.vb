@@ -37,12 +37,14 @@ Namespace MacroAutoControl
         Private nudAIDepth As NumericUpDown
         Private nudAITime As NumericUpDown
         Private WithEvents btnAIAdd As Button
+        Private WithEvents btnImageTest As Button
         Private WithEvents btnAITest As Button
 
         ' AI 보드 인식기 (테스트용)
         Private _boardRecognizer As MacroAutoControl.Capture.BoardRecognizer = Nothing
         Private _previousDropBoard As MacroAutoControl.Engine.Board = Nothing
         Private _isDroppedImage As Boolean = False
+        Private _droppedImagePath As String = Nothing
 
         ' UI 컨트롤 - 모니터 선택
         Private lstMonitors As ListBox
@@ -359,12 +361,22 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(btnAIAdd)
             gy += rowH
 
-            ' 옵션 행 4: AI 테스트
+            ' 옵션 행 4: 이미지 테스트 + AI 테스트
+            btnImageTest = New Button() With {
+                .Text = "이미지 테스트",
+                .Location = New Point(10, gy),
+                .Size = New Size(halfW, 25),
+                .Anchor = AnchorStyles.Top Or AnchorStyles.Left,
+                .BackColor = Color.FromArgb(220, 240, 200),
+                .Font = New Font(Me.Font, FontStyle.Bold)
+            }
+            grpMacro.Controls.Add(btnImageTest)
+
             btnAITest = New Button() With {
                 .Text = "AI 테스트 ▶",
-                .Location = New Point(10, gy),
-                .Size = New Size(pw - 22, 25),
-                .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
+                .Location = New Point(10 + halfW + 4, gy),
+                .Size = New Size(halfW, 25),
+                .Anchor = AnchorStyles.Top Or AnchorStyles.Right,
                 .BackColor = Color.FromArgb(200, 220, 255),
                 .Font = New Font(Me.Font, FontStyle.Bold)
             }
@@ -784,6 +796,64 @@ Namespace MacroAutoControl
             UpdateStatus($"AI 항목 추가: {name} (깊이:{depth}, 시간:{time:F0}s)")
         End Sub
 
+        Private Sub btnImageTest_Click(sender As Object, e As EventArgs) Handles btnImageTest.Click
+            btnImageTest.Enabled = False
+            Try
+                ' 드롭 이미지가 있으면 같은 폴더에서 다음 이미지 로드
+                If _isDroppedImage AndAlso _droppedImagePath IsNot Nothing Then
+                    Dim dir = IO.Path.GetDirectoryName(_droppedImagePath)
+                    Dim exts = {".png", ".jpg", ".jpeg", ".bmp"}
+                    Dim allFiles = IO.Directory.GetFiles(dir).
+                        Where(Function(f) exts.Contains(IO.Path.GetExtension(f).ToLower())).
+                        OrderBy(Function(f) f).ToArray()
+
+                    Dim curIdx = Array.IndexOf(allFiles, _droppedImagePath)
+                    Dim nextIdx = curIdx + 1
+                    If nextIdx >= allFiles.Length Then
+                        UpdateStatus("이미지 테스트: 마지막 이미지입니다.")
+                        Return
+                    End If
+
+                    Dim nextPath = allFiles(nextIdx)
+                    Try
+                        Dim bmp As New Bitmap(nextPath)
+                        picPreview.Image = Nothing
+                        _screenshot?.Dispose()
+                        _screenshot = bmp
+                        _isDroppedImage = True
+                        _droppedImagePath = nextPath
+                        picPreview.Image = _screenshot
+                        UpdateStatus($"이미지 로드: {IO.Path.GetFileName(nextPath)} ({nextIdx + 1}/{allFiles.Length})")
+                        Application.DoEvents()
+                    Catch ex As Exception
+                        UpdateStatus($"이미지 로드 오류: {ex.Message}")
+                        Return
+                    End Try
+                Else
+                    ' 드롭 이미지 없으면 캡처
+                    If _screenshot Is Nothing Then
+                        If Not AutoSelectJanggiWindow() Then Return
+
+                        Dim bmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                        If bmp Is Nothing Then
+                            UpdateStatus("이미지 테스트: 캡처 실패")
+                            Return
+                        End If
+
+                        picPreview.Image = Nothing
+                        _screenshot?.Dispose()
+                        _screenshot = bmp
+                        _isDroppedImage = False
+                        picPreview.Image = _screenshot
+                    End If
+                End If
+
+                RunAITestOnCurrentImage(runAI:=False)
+            Finally
+                btnImageTest.Enabled = True
+            End Try
+        End Sub
+
         Private Sub btnAITest_Click(sender As Object, e As EventArgs) Handles btnAITest.Click
             btnAITest.Enabled = False
             Try
@@ -948,9 +1018,9 @@ Namespace MacroAutoControl
                         If smallOuterR < 18 Then smallOuterR = 18
                         ' 궁용 확대 링
                         Dim bigInnerR = CInt(baseSize * 0.42)
-                        Dim bigOuterR = CInt(baseSize * 0.52)
+                        Dim bigOuterR = CInt(baseSize * 0.572)
                         If bigInnerR < 18 Then bigInnerR = 18
-                        If bigOuterR < 22 Then bigOuterR = 22
+                        If bigOuterR < 24 Then bigOuterR = 24
 
                         ' 기물 표시 (적 기물 먼저, 내 기물 나중에)
                         For pass = 0 To 1
@@ -1042,14 +1112,14 @@ Namespace MacroAutoControl
                             Dim targetSide = If(movedSide = CHO, HAN, CHO)
                             If board.IsInCheck(targetSide) Then
                                 If targetSide = side Then
-                                    ' 내가 장군 당함 → 멍군 필요
                                     inCheck = True
                                     checkInfo = "  ★ 장군! 멍군필요"
                                 Else
-                                    ' 상대가 장군 당함
                                     checkInfo = "  ★ 장군!"
                                 End If
                             End If
+                        Else
+                            moveInfo = "  |  마지막 이동 기물 없음"
                         End If
                         Dim summary = $"[{sideText}] 내 {myCount}개  적 {enemyCount}개{moveInfo}{checkInfo}"
                         Dim summaryColor = If(inCheck, Color.FromArgb(255, 255, 80, 80), Color.FromArgb(255, 100, 255, 100))
@@ -1684,6 +1754,7 @@ Namespace MacroAutoControl
                 _screenshot?.Dispose()
                 _screenshot = bmp
                 _isDroppedImage = True
+                _droppedImagePath = path
                 picPreview.Image = _screenshot
 
                 UpdateStatus($"이미지 로드: {IO.Path.GetFileName(path)} ({bmp.Width}x{bmp.Height})")

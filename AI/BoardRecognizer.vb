@@ -9,6 +9,8 @@ Namespace MacroAutoControl.Capture
 
         Private _templates As New Dictionary(Of String, Mat)
         Private _templatesGray As New Dictionary(Of String, Mat)
+        Private _templatesScaled As New Dictionary(Of Double, Dictionary(Of String, Mat))
+        Private _templatesGrayScaled As New Dictionary(Of Double, Dictionary(Of String, Mat))
         Private _matchThreshold As Double = 0.55
         Private _gridPositions As Integer()() = Nothing
         Private _cellSize As (Integer, Integer) = (0, 0)
@@ -81,32 +83,65 @@ Namespace MacroAutoControl.Capture
                     End If
                 End If
             Next
+            ' 스케일별 템플릿 사전 캐싱
+            For Each scale In {0.88, 0.94, 1.06, 1.12}
+                Dim scaledColor As New Dictionary(Of String, Mat)
+                For Each kvp In _templates
+                    Dim th = CInt(kvp.Value.Rows * scale)
+                    Dim tw = CInt(kvp.Value.Cols * scale)
+                    If th < 10 OrElse tw < 10 Then Continue For
+                    Dim scaled As New Mat()
+                    Cv2.Resize(kvp.Value, scaled, New OpenCvSharp.Size(tw, th), 0, 0, InterpolationFlags.Area)
+                    scaledColor(kvp.Key) = scaled
+                Next
+                _templatesScaled(scale) = scaledColor
+            Next
+            For Each scale In {0.88, 0.94, 1.0, 1.06, 1.12}
+                Dim scaledGray As New Dictionary(Of String, Mat)
+                For Each kvp In _templatesGray
+                    Dim th = CInt(kvp.Value.Rows * scale)
+                    Dim tw = CInt(kvp.Value.Cols * scale)
+                    If th < 10 OrElse tw < 10 Then Continue For
+                    Dim scaled As New Mat()
+                    Cv2.Resize(kvp.Value, scaled, New OpenCvSharp.Size(tw, th), 0, 0, InterpolationFlags.Area)
+                    scaledGray(kvp.Key) = scaled
+                Next
+                _templatesGrayScaled(scale) = scaledGray
+            Next
+
             Console.WriteLine($"[알림] 템플릿 {loaded}/{ALL_PIECES.Length}개 로드됨")
             Return loaded
         End Function
 
         Private Function DetectBoardRect(image As Mat) As OpenCvSharp.Rect?
             Dim gray As New Mat()
-            Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
             Dim thresh As New Mat()
-            Cv2.Threshold(gray, thresh, 150, 255, ThresholdTypes.Binary)
-            Dim kernel = Cv2.GetStructuringElement(MorphShapes.Rect, New OpenCvSharp.Size(10, 10))
-            Cv2.MorphologyEx(thresh, thresh, MorphTypes.Close, kernel)
-            Cv2.MorphologyEx(thresh, thresh, MorphTypes.Open, kernel)
+            Dim kernel As Mat = Nothing
+            Try
+                Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
+                Cv2.Threshold(gray, thresh, 150, 255, ThresholdTypes.Binary)
+                kernel = Cv2.GetStructuringElement(MorphShapes.Rect, New OpenCvSharp.Size(10, 10))
+                Cv2.MorphologyEx(thresh, thresh, MorphTypes.Close, kernel)
+                Cv2.MorphologyEx(thresh, thresh, MorphTypes.Open, kernel)
 
-            Dim contours As Point()()
-            Dim hierarchy As HierarchyIndex()
-            Cv2.FindContours(thresh, contours, hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple)
+                Dim contours As Point()()
+                Dim hierarchy As HierarchyIndex()
+                Cv2.FindContours(thresh, contours, hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple)
 
-            Dim h = image.Rows, w = image.Cols
-            Dim minArea = w * h * 0.1
-            Dim largeContours = contours.Where(Function(cnt) Cv2.ContourArea(cnt) > minArea).ToArray()
-            If largeContours.Length = 0 Then
-                Return Nothing
-            End If
+                Dim h = image.Rows, w = image.Cols
+                Dim minArea = w * h * 0.1
+                Dim largeContours = contours.Where(Function(cnt) Cv2.ContourArea(cnt) > minArea).ToArray()
+                If largeContours.Length = 0 Then
+                    Return Nothing
+                End If
 
-            Dim largest = largeContours.OrderByDescending(Function(cnt) Cv2.ContourArea(cnt)).First()
-            Return Cv2.BoundingRect(largest)
+                Dim largest = largeContours.OrderByDescending(Function(cnt) Cv2.ContourArea(cnt)).First()
+                Return Cv2.BoundingRect(largest)
+            Finally
+                gray.Dispose()
+                thresh.Dispose()
+                kernel?.Dispose()
+            End Try
         End Function
 
         Private Function FindGridLines(image As Mat, boardRect As OpenCvSharp.Rect) As (HLines As Integer(), VLines As Integer())
@@ -114,27 +149,36 @@ Namespace MacroAutoControl.Capture
             Dim crop = image(New OpenCvSharp.Rect(boardRect.X + margin, boardRect.Y + margin,
                                        boardRect.Width - 2 * margin, boardRect.Height - 2 * margin))
             Dim gray As New Mat()
-            Cv2.CvtColor(crop, gray, ColorConversionCodes.BGR2GRAY)
-
             Dim sobelX As New Mat()
-            Cv2.Sobel(gray, sobelX, MatType.CV_64F, 1, 0, 3)
             Dim absSobelX As New Mat()
-            Cv2.ConvertScaleAbs(sobelX, absSobelX)
-            Dim vProfile = GetColumnProfile(absSobelX)
-            Dim vDist = Math.Max(20, boardRect.Width \ 12)
-            Dim vPeaks = FindPeaks(vProfile, vDist, 3)
-            Dim vLines = vPeaks.Select(Function(p) p + boardRect.X + margin).ToArray()
-
             Dim sobelY As New Mat()
-            Cv2.Sobel(gray, sobelY, MatType.CV_64F, 0, 1, 3)
             Dim absSobelY As New Mat()
-            Cv2.ConvertScaleAbs(sobelY, absSobelY)
-            Dim hProfile = GetRowProfile(absSobelY)
-            Dim hDist = Math.Max(20, boardRect.Height \ 14)
-            Dim hPeaks = FindPeaks(hProfile, hDist, 3)
-            Dim hLines = hPeaks.Select(Function(p) p + boardRect.Y + margin).ToArray()
+            Try
+                Cv2.CvtColor(crop, gray, ColorConversionCodes.BGR2GRAY)
 
-            Return (hLines, vLines)
+                Cv2.Sobel(gray, sobelX, MatType.CV_64F, 1, 0, 3)
+                Cv2.ConvertScaleAbs(sobelX, absSobelX)
+                Dim vProfile = GetColumnProfile(absSobelX)
+                Dim vDist = Math.Max(20, boardRect.Width \ 12)
+                Dim vPeaks = FindPeaks(vProfile, vDist, 3)
+                Dim vLines = vPeaks.Select(Function(p) p + boardRect.X + margin).ToArray()
+
+                Cv2.Sobel(gray, sobelY, MatType.CV_64F, 0, 1, 3)
+                Cv2.ConvertScaleAbs(sobelY, absSobelY)
+                Dim hProfile = GetRowProfile(absSobelY)
+                Dim hDist = Math.Max(20, boardRect.Height \ 14)
+                Dim hPeaks = FindPeaks(hProfile, hDist, 3)
+                Dim hLines = hPeaks.Select(Function(p) p + boardRect.Y + margin).ToArray()
+
+                Return (hLines, vLines)
+            Finally
+                crop.Dispose()
+                gray.Dispose()
+                sobelX.Dispose()
+                absSobelX.Dispose()
+                sobelY.Dispose()
+                absSobelY.Dispose()
+            End Try
         End Function
 
         Private Function GetColumnProfile(mat As Mat) As Double()
@@ -364,30 +408,38 @@ Namespace MacroAutoControl.Capture
             Dim centerRect As New OpenCvSharp.Rect(marginX, marginY, cw - marginX * 2, ch - marginY * 2)
             If centerRect.Width < 4 OrElse centerRect.Height < 4 Then centerRect = New OpenCvSharp.Rect(0, 0, cw, ch)
             Dim center = cellImage(centerRect)
-
             Dim hsv As New Mat()
-            Cv2.CvtColor(center, hsv, ColorConversionCodes.BGR2HSV)
-
-            Dim mr1 As New Mat(), mr2 As New Mat()
-            Cv2.InRange(hsv, New Scalar(0, 40, 60), New Scalar(12, 255, 255), mr1)
-            Cv2.InRange(hsv, New Scalar(158, 40, 60), New Scalar(180, 255, 255), mr2)
-            Dim redPx = Cv2.CountNonZero(mr1) + Cv2.CountNonZero(mr2)
-
+            Dim mr1 As New Mat()
+            Dim mr2 As New Mat()
             Dim mb As New Mat()
-            Cv2.InRange(hsv, New Scalar(85, 40, 60), New Scalar(135, 255, 255), mb)
-            Dim bluePx = Cv2.CountNonZero(mb)
+            Try
+                Cv2.CvtColor(center, hsv, ColorConversionCodes.BGR2HSV)
 
-            Dim total = center.Rows * center.Cols
+                Cv2.InRange(hsv, New Scalar(0, 40, 60), New Scalar(12, 255, 255), mr1)
+                Cv2.InRange(hsv, New Scalar(158, 40, 60), New Scalar(180, 255, 255), mr2)
+                Dim redPx = Cv2.CountNonZero(mr1) + Cv2.CountNonZero(mr2)
 
-            ' 30% 이상 파란색이면 초(CHO), 30% 이상 빨간색이면 한(HAN)
-            If bluePx >= total * 0.3 Then Return CHO
-            If redPx >= total * 0.3 Then Return HAN
+                Cv2.InRange(hsv, New Scalar(85, 40, 60), New Scalar(135, 255, 255), mb)
+                Dim bluePx = Cv2.CountNonZero(mb)
 
-            ' 비율 미달 시 상대 비교
-            Dim minPx = Math.Max(10, total * 0.02)
-            If redPx > minPx AndAlso redPx > bluePx * 1.3 Then Return HAN
-            If bluePx > minPx AndAlso bluePx > redPx * 1.3 Then Return CHO
-            Return Nothing
+                Dim total = center.Rows * center.Cols
+
+                ' 30% 이상 파란색이면 초(CHO), 30% 이상 빨간색이면 한(HAN)
+                If bluePx >= total * 0.3 Then Return CHO
+                If redPx >= total * 0.3 Then Return HAN
+
+                ' 비율 미달 시 상대 비교
+                Dim minPx = Math.Max(10, total * 0.02)
+                If redPx > minPx AndAlso redPx > bluePx * 1.3 Then Return HAN
+                If bluePx > minPx AndAlso bluePx > redPx * 1.3 Then Return CHO
+                Return Nothing
+            Finally
+                center.Dispose()
+                hsv.Dispose()
+                mr1.Dispose()
+                mr2.Dispose()
+                mb.Dispose()
+            End Try
         End Function
 
         Public Function RecognizePiece(cellImage As Mat) As String
@@ -403,98 +455,131 @@ Namespace MacroAutoControl.Capture
             If _templates.Count = 0 Then Return EMPTY
 
             ' 채널 보정: 4채널(BGRA) → 3채널(BGR)
+            Dim convertedCell As Mat = Nothing
             If cellImage.Channels() = 4 Then
-                Dim bgr As New Mat()
-                Cv2.CvtColor(cellImage, bgr, ColorConversionCodes.BGRA2BGR)
-                cellImage = bgr
+                convertedCell = New Mat()
+                Cv2.CvtColor(cellImage, convertedCell, ColorConversionCodes.BGRA2BGR)
+                cellImage = convertedCell
             ElseIf cellImage.Channels() = 1 Then
-                Dim bgr As New Mat()
-                Cv2.CvtColor(cellImage, bgr, ColorConversionCodes.GRAY2BGR)
-                cellImage = bgr
+                convertedCell = New Mat()
+                Cv2.CvtColor(cellImage, convertedCell, ColorConversionCodes.GRAY2BGR)
+                cellImage = convertedCell
             End If
 
-            Dim bestMatch = EMPTY
-            Dim bestScore = _matchThreshold
-            Dim ch = cellImage.Rows, cw = cellImage.Cols
+            Try
+                Dim ch = cellImage.Rows, cw = cellImage.Cols
 
-            For Each kvp In _templates
-                Dim th = kvp.Value.Rows, tw = kvp.Value.Cols
-                If th > ch OrElse tw > cw Then Continue For
-                Dim result As New Mat()
-                Cv2.MatchTemplate(cellImage, kvp.Value, result, TemplateMatchModes.CCoeffNormed)
-                Dim maxVal As Double
-                result.MinMaxLoc(Nothing, maxVal)
-                If maxVal > bestScore Then
-                    bestScore = maxVal
-                    bestMatch = kvp.Key
-                End If
-            Next
-            If bestScore >= 0.7 Then
-                ' 높은 확신도: 글자 모양(템플릿) 우선 신뢰, 색상 검증 생략
-                Return bestMatch
-            End If
+                ' 빈 칸 사전 판별: 유채색 픽셀 비율이 극히 낮으면 빈 칸으로 판정
+                Using hsvCheck As New Mat()
+                    Cv2.CvtColor(cellImage, hsvCheck, ColorConversionCodes.BGR2HSV)
+                    Using satMask As New Mat()
+                        Cv2.InRange(hsvCheck, New Scalar(0, 40, 60), New Scalar(180, 255, 255), satMask)
+                        Dim colorPx = Cv2.CountNonZero(satMask)
+                        Dim totalPx = ch * cw
+                        If totalPx > 0 AndAlso colorPx < totalPx * 0.03 Then
+                            Return EMPTY
+                        End If
+                    End Using
+                End Using
 
-            For Each scale In {0.88, 0.94, 1.06, 1.12}
+                Dim bestMatch = EMPTY
+                Dim bestScore = _matchThreshold
+
                 For Each kvp In _templates
-                    Dim th = CInt(kvp.Value.Rows * scale)
-                    Dim tw = CInt(kvp.Value.Cols * scale)
-                    If th > ch OrElse tw > cw OrElse th < 10 OrElse tw < 10 Then Continue For
-                    Dim tmplR As New Mat()
-                    Cv2.Resize(kvp.Value, tmplR, New OpenCvSharp.Size(tw, th), 0, 0, InterpolationFlags.Area)
-                    Dim result As New Mat()
-                    Cv2.MatchTemplate(cellImage, tmplR, result, TemplateMatchModes.CCoeffNormed)
-                    Dim maxVal As Double
-                    result.MinMaxLoc(Nothing, maxVal)
-                    If maxVal > bestScore Then
-                        bestScore = maxVal
-                        bestMatch = kvp.Key
-                    End If
+                    Dim th = kvp.Value.Rows, tw = kvp.Value.Cols
+                    If th > ch OrElse tw > cw Then Continue For
+                    Using result As New Mat()
+                        Cv2.MatchTemplate(cellImage, kvp.Value, result, TemplateMatchModes.CCoeffNormed)
+                        Dim maxVal As Double
+                        result.MinMaxLoc(Nothing, maxVal)
+                        If maxVal > bestScore Then
+                            bestScore = maxVal
+                            bestMatch = kvp.Key
+                        End If
+                    End Using
                 Next
-            Next
-            If bestScore >= 0.65 Then
-                ' 중간 확신도: 색상으로 보조 검증
-                bestMatch = VerifyColorSide(cellImage, bestMatch)
-                Return bestMatch
-            End If
-
-            Dim cellGray As New Mat()
-            Cv2.CvtColor(cellImage, cellGray, ColorConversionCodes.BGR2GRAY)
-            Dim cellColor = DetectCellColor(cellImage)
-            Dim grayMatch = EMPTY
-            Dim grayScore = _matchThreshold
-
-            For Each scale In {0.88, 0.94, 1.0, 1.06, 1.12}
-                For Each kvp In _templatesGray
-                    Dim th = CInt(kvp.Value.Rows * scale)
-                    Dim tw = CInt(kvp.Value.Cols * scale)
-                    If th > ch OrElse tw > cw OrElse th < 10 OrElse tw < 10 Then Continue For
-                    Dim gr As New Mat()
-                    Cv2.Resize(kvp.Value, gr, New OpenCvSharp.Size(tw, th), 0, 0, InterpolationFlags.Area)
-                    Dim result As New Mat()
-                    Cv2.MatchTemplate(cellGray, gr, result, TemplateMatchModes.CCoeffNormed)
-                    Dim maxVal As Double
-                    result.MinMaxLoc(Nothing, maxVal)
-                    If maxVal > grayScore Then
-                        grayScore = maxVal
-                        grayMatch = kvp.Key
-                    End If
-                Next
-            Next
-
-            If grayMatch <> EMPTY AndAlso grayScore > bestScore Then
-                Dim matchedSide As String = Nothing
-                _pieceSide.TryGetValue(grayMatch, matchedSide)
-                If cellColor IsNot Nothing AndAlso matchedSide <> cellColor Then
-                    Dim cross As String = Nothing
-                    If _crossSideMap.TryGetValue(grayMatch, cross) Then
-                        grayMatch = cross
-                    End If
+                If bestScore >= 0.7 Then
+                    Return bestMatch
                 End If
-                bestMatch = grayMatch
-                bestScore = grayScore
-            End If
 
-            Return bestMatch
+                For Each scale In {0.88, 0.94, 1.06, 1.12}
+                    For Each kvp In _templates
+                        Dim th = CInt(kvp.Value.Rows * scale)
+                        Dim tw = CInt(kvp.Value.Cols * scale)
+                        If th > ch OrElse tw > cw OrElse th < 10 OrElse tw < 10 Then Continue For
+                        ' 캐시된 스케일 템플릿 사용
+                        Dim scaledTmpl As Mat = Nothing
+                        Dim scaledDict As Dictionary(Of String, Mat) = Nothing
+                        If _templatesScaled.TryGetValue(scale, scaledDict) Then
+                            scaledDict.TryGetValue(kvp.Key, scaledTmpl)
+                        End If
+                        If scaledTmpl Is Nothing Then Continue For
+                        If scaledTmpl.Rows > ch OrElse scaledTmpl.Cols > cw Then Continue For
+                        Using result As New Mat()
+                            Cv2.MatchTemplate(cellImage, scaledTmpl, result, TemplateMatchModes.CCoeffNormed)
+                            Dim maxVal As Double
+                            result.MinMaxLoc(Nothing, maxVal)
+                            If maxVal > bestScore Then
+                                bestScore = maxVal
+                                bestMatch = kvp.Key
+                            End If
+                        End Using
+                    Next
+                Next
+                If bestScore >= 0.65 Then
+                    bestMatch = VerifyColorSide(cellImage, bestMatch)
+                    Return bestMatch
+                End If
+
+                Using cellGray As New Mat()
+                    Cv2.CvtColor(cellImage, cellGray, ColorConversionCodes.BGR2GRAY)
+                    Dim cellColor = DetectCellColor(cellImage)
+                    Dim grayMatch = EMPTY
+                    Dim grayScore = _matchThreshold
+
+                    For Each scale In {0.88, 0.94, 1.0, 1.06, 1.12}
+                        For Each kvp In _templatesGray
+                            Dim th = CInt(kvp.Value.Rows * scale)
+                            Dim tw = CInt(kvp.Value.Cols * scale)
+                            If th > ch OrElse tw > cw OrElse th < 10 OrElse tw < 10 Then Continue For
+                            ' 캐시된 그레이 스케일 템플릿 사용
+                            Dim scaledTmpl As Mat = Nothing
+                            Dim scaledDict As Dictionary(Of String, Mat) = Nothing
+                            If _templatesGrayScaled.TryGetValue(scale, scaledDict) Then
+                                scaledDict.TryGetValue(kvp.Key, scaledTmpl)
+                            End If
+                            If scaledTmpl Is Nothing Then Continue For
+                            If scaledTmpl.Rows > ch OrElse scaledTmpl.Cols > cw Then Continue For
+                            Using result As New Mat()
+                                Cv2.MatchTemplate(cellGray, scaledTmpl, result, TemplateMatchModes.CCoeffNormed)
+                                Dim maxVal As Double
+                                result.MinMaxLoc(Nothing, maxVal)
+                                If maxVal > grayScore Then
+                                    grayScore = maxVal
+                                    grayMatch = kvp.Key
+                                End If
+                            End Using
+                        Next
+                    Next
+
+                    If grayMatch <> EMPTY AndAlso grayScore > bestScore Then
+                        Dim matchedSide As String = Nothing
+                        _pieceSide.TryGetValue(grayMatch, matchedSide)
+                        If cellColor IsNot Nothing AndAlso matchedSide <> cellColor Then
+                            Dim cross As String = Nothing
+                            If _crossSideMap.TryGetValue(grayMatch, cross) Then
+                                grayMatch = cross
+                            End If
+                        End If
+                        bestMatch = grayMatch
+                        bestScore = grayScore
+                    End If
+                End Using
+
+                Return bestMatch
+            Finally
+                convertedCell?.Dispose()
+            End Try
         End Function
 
         ''' <summary>
@@ -556,7 +641,9 @@ Namespace MacroAutoControl.Capture
                 Console.WriteLine("[정규화] 보드 상하 반전 (초궁이 위에 있었음)")
             End If
 
-            Return New Board(grid)
+            Dim result = New Board(grid)
+            If Not ValidateGridWithPieces(result) Then Return Nothing
+            Return result
         End Function
 
         ''' <summary>
@@ -749,13 +836,13 @@ Namespace MacroAutoControl.Capture
         ' ───── 하이라이트 감지 ─────
 
         ''' <summary>
-        ''' HSV 기반으로 기물 주변의 금색 빛남 픽셀 수를 측정.
-        ''' 링 영역(innerR ~ outerR)을 촘촘하게 샘플링하여 정확도 향상.
+        ''' HSV 기반으로 기물 주변의 금색 글로우 픽셀 수를 측정.
+        ''' 금색 기준: H 15~30, S > 50, V > 220 (카카오장기 하이라이트 색상)
+        ''' 링 영역(innerR ~ outerR)을 촘촘하게 샘플링.
         ''' </summary>
         Private Function CountRingGlowPixels(hsv As Mat, cx As Integer, cy As Integer,
                                               innerR As Integer, outerR As Integer) As Integer
-            Dim totalV As Long = 0
-            Dim sampleCount = 0
+            Dim glowCount = 0
             Dim imgH = hsv.Rows, imgW = hsv.Cols
 
             ' 링 영역을 2px 간격으로 촘촘하게 샘플링
@@ -771,14 +858,44 @@ Namespace MacroAutoControl.Capture
                     Dim pixel(2) As Byte
                     Runtime.InteropServices.Marshal.Copy(
                         hsv.Data + (py * CInt(hsv.Step()) + px * 3), pixel, 0, 3)
+                    Dim h = CInt(pixel(0))
+                    Dim s = CInt(pixel(1))
                     Dim v = CInt(pixel(2))
 
-                    totalV += v
-                    sampleCount += 1
+                    ' 금색 글로우: H 15~30, S > 50, V > 220
+                    If h >= 15 AndAlso h <= 30 AndAlso s > 50 AndAlso v > 220 Then
+                        glowCount += 1
+                    End If
                 Next
             Next
-            If sampleCount = 0 Then Return 0
-            Return CInt(totalV \ sampleCount)
+            Return glowCount
+        End Function
+
+        Private Function GetRingSizes() As (Inner As Integer, Outer As Integer, SmallInner As Integer, SmallOuter As Integer, BigInner As Integer, BigOuter As Integer)
+            Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
+            If baseSize <= 0 Then baseSize = 60
+            Dim innerR = CInt(baseSize * 0.42)
+            Dim outerR = CInt(baseSize * 0.52)
+            If innerR < 18 Then innerR = 18
+            If outerR < 22 Then outerR = 22
+            Dim smallInnerR = CInt(baseSize * 0.32)
+            Dim smallOuterR = CInt(baseSize * 0.42)
+            If smallInnerR < 14 Then smallInnerR = 14
+            If smallOuterR < 18 Then smallOuterR = 18
+            Dim bigInnerR = CInt(baseSize * 0.42)
+            Dim bigOuterR = CInt(baseSize * 0.572)
+            If bigInnerR < 18 Then bigInnerR = 18
+            If bigOuterR < 24 Then bigOuterR = 24
+            Return (innerR, outerR, smallInnerR, smallOuterR, bigInnerR, bigOuterR)
+        End Function
+
+        Private Shared Function SelectRingForPiece(piece As String, sizes As (Inner As Integer, Outer As Integer, SmallInner As Integer, SmallOuter As Integer, BigInner As Integer, BigOuter As Integer)) As (Inner As Integer, Outer As Integer)
+            If piece = CJ OrElse piece = HB OrElse piece = CS OrElse piece = HS Then
+                Return (sizes.SmallInner, sizes.SmallOuter)
+            ElseIf piece = CK OrElse piece = HK Then
+                Return (sizes.BigInner, sizes.BigOuter)
+            End If
+            Return (sizes.Inner, sizes.Outer)
         End Function
 
         ''' <summary>
@@ -789,32 +906,13 @@ Namespace MacroAutoControl.Capture
         Public Function DetectHighlightedPiece(image As Mat, board As Board) As (Row As Integer, Col As Integer, Side As String, GlowCount As Integer)?
             If _gridPositions Is Nothing Then Return Nothing
 
-            ' BGR → HSV 변환
             Dim hsv As New Mat()
             Cv2.CvtColor(image, hsv, ColorConversionCodes.BGR2HSV)
 
-            ' 링 크기 계산 (기물 바깥 영역)
-            Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
-            If baseSize <= 0 Then baseSize = 60
-            Dim innerR = CInt(baseSize * 0.42)
-            Dim outerR = CInt(baseSize * 0.52)
-            If innerR < 18 Then innerR = 18
-            If outerR < 22 Then outerR = 22
-
+            Dim sizes = GetRingSizes()
             Dim bestGlow = 0
             Dim bestRow = -1, bestCol = -1
             Dim secondGlow = 0
-
-            ' 졸/병/사용 축소 링
-            Dim smallInnerR = CInt(baseSize * 0.32)
-            Dim smallOuterR = CInt(baseSize * 0.42)
-            If smallInnerR < 14 Then smallInnerR = 14
-            If smallOuterR < 18 Then smallOuterR = 18
-            ' 궁용 확대 링
-            Dim bigInnerR = CInt(baseSize * 0.42)
-            Dim bigOuterR = CInt(baseSize * 0.52)
-            If bigInnerR < 18 Then bigInnerR = 18
-            If bigOuterR < 22 Then bigOuterR = 22
 
             For r = 0 To BOARD_ROWS - 1
                 For c = 0 To BOARD_COLS - 1
@@ -826,17 +924,8 @@ Namespace MacroAutoControl.Capture
                     Dim cx = _gridPositions(idx)(0)
                     Dim cy = _gridPositions(idx)(1)
 
-                    ' 기물별 링 크기
-                    Dim useInner = innerR, useOuter = outerR
-                    If p = CJ OrElse p = HB OrElse p = CS OrElse p = HS Then
-                        useInner = smallInnerR
-                        useOuter = smallOuterR
-                    ElseIf p = CK OrElse p = HK Then
-                        useInner = bigInnerR
-                        useOuter = bigOuterR
-                    End If
-
-                    Dim glow = CountRingGlowPixels(hsv, cx, cy, useInner, useOuter)
+                    Dim ring = SelectRingForPiece(p, sizes)
+                    Dim glow = CountRingGlowPixels(hsv, cx, cy, ring.Inner, ring.Outer)
 
                     If glow > bestGlow Then
                         secondGlow = bestGlow
@@ -850,13 +939,8 @@ Namespace MacroAutoControl.Capture
             Next
             hsv.Dispose()
 
-            ' 최소 빛남 임계값: 10픽셀 이상 + 2위 대비 2배 이상 차이
-            If bestRow < 0 OrElse bestGlow < 10 Then Return Nothing
-            If secondGlow > 0 AndAlso bestGlow < secondGlow * 2 Then
-                ' 1위와 2위 차이가 불분명하면 신뢰도 낮음 → 그래도 1위 반환 (임계값은 충족)
-                ' 단, 1위가 충분히 강하면 (20 이상) 그대로 반환
-                If bestGlow < 20 Then Return Nothing
-            End If
+            ' 최소 빛남 임계값: 금색 픽셀 100개 이상
+            If bestRow < 0 OrElse bestGlow < 100 Then Return Nothing
 
             Dim piece = board.Grid(bestRow)(bestCol)
             Dim side As String = Nothing
@@ -876,23 +960,7 @@ Namespace MacroAutoControl.Capture
             Dim hsv As New Mat()
             Cv2.CvtColor(image, hsv, ColorConversionCodes.BGR2HSV)
 
-            Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
-            If baseSize <= 0 Then baseSize = 60
-            Dim innerR = CInt(baseSize * 0.42)
-            Dim outerR = CInt(baseSize * 0.52)
-            If innerR < 18 Then innerR = 18
-            If outerR < 22 Then outerR = 22
-
-            ' 졸/병/사용 축소 링
-            Dim smallInnerR = CInt(baseSize * 0.32)
-            Dim smallOuterR = CInt(baseSize * 0.42)
-            If smallInnerR < 14 Then smallInnerR = 14
-            If smallOuterR < 18 Then smallOuterR = 18
-            ' 궁용 확대 링
-            Dim bigInnerR = CInt(baseSize * 0.42)
-            Dim bigOuterR = CInt(baseSize * 0.52)
-            If bigInnerR < 18 Then bigInnerR = 18
-            If bigOuterR < 22 Then bigOuterR = 22
+            Dim sizes = GetRingSizes()
 
             For r = 0 To BOARD_ROWS - 1
                 For c = 0 To BOARD_COLS - 1
@@ -903,16 +971,8 @@ Namespace MacroAutoControl.Capture
                     Dim cx = _gridPositions(idx)(0)
                     Dim cy = _gridPositions(idx)(1)
 
-                    Dim useInner = innerR, useOuter = outerR
-                    If p = CJ OrElse p = HB OrElse p = CS OrElse p = HS Then
-                        useInner = smallInnerR
-                        useOuter = smallOuterR
-                    ElseIf p = CK OrElse p = HK Then
-                        useInner = bigInnerR
-                        useOuter = bigOuterR
-                    End If
-
-                    Dim glow = CountRingGlowPixels(hsv, cx, cy, useInner, useOuter)
+                    Dim ring = SelectRingForPiece(p, sizes)
+                    Dim glow = CountRingGlowPixels(hsv, cx, cy, ring.Inner, ring.Outer)
                     If glow > 0 Then
                         results.Add((r, c, p, glow))
                     End If
@@ -951,18 +1011,20 @@ Namespace MacroAutoControl.Capture
             Dim found As New List(Of String)
             If _buttonTemplates.Count = 0 Then Return found
 
-            Dim gray As New Mat()
-            Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
+            Using gray As New Mat()
+                Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
 
-            For Each kvp In _buttonTemplates
-                Dim result As New Mat()
-                Cv2.MatchTemplate(gray, kvp.Value.Gray, result, TemplateMatchModes.CCoeffNormed)
-                Dim maxVal As Double
-                result.MinMaxLoc(Nothing, maxVal)
-                If maxVal >= threshold Then
-                    found.Add(BUTTON_NAMES(kvp.Key))
-                End If
-            Next
+                For Each kvp In _buttonTemplates
+                    Using result As New Mat()
+                        Cv2.MatchTemplate(gray, kvp.Value.Gray, result, TemplateMatchModes.CCoeffNormed)
+                        Dim maxVal As Double
+                        result.MinMaxLoc(Nothing, maxVal)
+                        If maxVal >= threshold Then
+                            found.Add(BUTTON_NAMES(kvp.Key))
+                        End If
+                    End Using
+                Next
+            End Using
             Return found
         End Function
 
@@ -996,38 +1058,41 @@ Namespace MacroAutoControl.Capture
         Public Function DetectGameResult(image As Mat, Optional threshold As Double = 0.7) As String
             If _resultTemplates.Count = 0 Then Return Nothing
 
-            Dim gray As New Mat()
-            Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
+            Using gray As New Mat()
+                Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY)
 
-            Dim bestName As String = Nothing
-            Dim bestScore As Double = threshold
+                Dim bestName As String = Nothing
+                Dim bestScore As Double = threshold
 
-            For Each kvp In _resultTemplates
-                Dim tmplC = kvp.Value.Color
-                Dim tmplG = kvp.Value.Gray
+                For Each kvp In _resultTemplates
+                    Dim tmplC = kvp.Value.Color
+                    Dim tmplG = kvp.Value.Gray
 
-                If tmplC.Rows > image.Rows OrElse tmplC.Cols > image.Cols Then Continue For
+                    If tmplC.Rows > image.Rows OrElse tmplC.Cols > image.Cols Then Continue For
 
-                ' 컬러 매칭
-                Dim resultC As New Mat()
-                Cv2.MatchTemplate(image, tmplC, resultC, TemplateMatchModes.CCoeffNormed)
-                Dim maxC As Double
-                resultC.MinMaxLoc(Nothing, maxC)
+                    ' 컬러 매칭
+                    Using resultC As New Mat()
+                        Cv2.MatchTemplate(image, tmplC, resultC, TemplateMatchModes.CCoeffNormed)
+                        Dim maxC As Double
+                        resultC.MinMaxLoc(Nothing, maxC)
 
-                ' 그레이 매칭
-                Dim resultG As New Mat()
-                Cv2.MatchTemplate(gray, tmplG, resultG, TemplateMatchModes.CCoeffNormed)
-                Dim maxG As Double
-                resultG.MinMaxLoc(Nothing, maxG)
+                        ' 그레이 매칭
+                        Using resultG As New Mat()
+                            Cv2.MatchTemplate(gray, tmplG, resultG, TemplateMatchModes.CCoeffNormed)
+                            Dim maxG As Double
+                            resultG.MinMaxLoc(Nothing, maxG)
 
-                Dim maxVal = Math.Max(maxC, maxG)
-                If maxVal > bestScore Then
-                    bestScore = maxVal
-                    bestName = RESULT_NAMES(kvp.Key)
-                End If
-            Next
+                            Dim maxVal = Math.Max(maxC, maxG)
+                            If maxVal > bestScore Then
+                                bestScore = maxVal
+                                bestName = RESULT_NAMES(kvp.Key)
+                            End If
+                        End Using
+                    End Using
+                Next
 
-            Return bestName
+                Return bestName
+            End Using
         End Function
 
         Public ReadOnly Property IsCalibrated As Boolean
