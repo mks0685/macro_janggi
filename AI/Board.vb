@@ -308,6 +308,11 @@ Namespace MacroAutoControl.Engine
             Return False
         End Function
 
+        ''' <summary>게임 수준 해시 히스토리를 보드에 주입 (MacroRunner에서 호출)</summary>
+        Public Sub InjectGameHistory(gameHashes As IEnumerable(Of ULong))
+            _hashHistory = New List(Of ULong)(gameHashes)
+        End Sub
+
         ''' <summary>
         ''' (r,c) 칸을 attackerSide가 공격하는 기물 중 가장 싼 기물 가치를 반환.
         ''' 공격자가 없으면 0. 궁=1(명목), 졸=200, 사=300, 상=350, 마=450, 포=800, 차=1300

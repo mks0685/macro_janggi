@@ -34,6 +34,9 @@ Namespace MacroAutoControl
         ' 보드/그리드 인식 연속 실패 카운터
         Private _recognitionFailCount As Integer = 0
 
+        ' 동일구간 반복 금지를 위한 게임 수준 해시 히스토리
+        Private _gameHashHistory As New List(Of ULong)
+
         ' 내 차례 스크린샷 저장
         Private _watchDir As String = Nothing
         Private _watchDateDir As String = Nothing
@@ -63,6 +66,14 @@ Namespace MacroAutoControl
         Public Sub Cancel()
             _cancelRequested = True
             Search.CancelSearch()
+        End Sub
+
+        ' 내차례 강제 지정 플래그
+        Private _forceMyTurn As Boolean = False
+
+        ''' <summary>내 차례 대기를 강제로 건너뛰고 즉시 AI 탐색 진행</summary>
+        Public Sub ForceMyTurn()
+            _forceMyTurn = True
         End Sub
 
         ''' <summary>
@@ -394,12 +405,16 @@ Namespace MacroAutoControl
                     End Try
                 End If
 
-                ' 빛남 감지
+                ' 빛남 감지 (강제 내차례 플래그 우선)
                 Dim gridPos = recognizer.GetGridPositions()
                 Dim cellSize = recognizer.GetCellSize()
                 Dim glowPiece As String = Nothing
                 Dim isMyTurn = False
-                If gridPos IsNot Nothing Then
+                If _forceMyTurn Then
+                    isMyTurn = True
+                    glowPiece = "강제지정"
+                    _forceMyTurn = False
+                ElseIf gridPos IsNot Nothing Then
                     isMyTurn = HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, targetWindow, glowPiece)
                 End If
 
@@ -566,6 +581,7 @@ Namespace MacroAutoControl
                     
                                 _gameEndReason = Nothing
                                 _recognizer?.ResetGrid()
+                                _gameHashHistory.Clear()
                                 RaiseEvent ProgressChanged(0, items.Count, "", $"게임 종료 → 재시작 대기 (3초)...", currentRepeat, totalRepeat)
                                 Application.DoEvents()
                                 Dim w = 0
@@ -685,6 +701,7 @@ Namespace MacroAutoControl
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {_gameEndReason} → 다음", currentRepeat, totalRepeat)
                     _gameEndReason = Nothing
                     _recognizer?.ResetGrid()
+                    _gameHashHistory.Clear()
                     Return False  ' 다음 매크로 항목으로
                 End If
                 Return False
@@ -722,6 +739,7 @@ Namespace MacroAutoControl
                     screenshot.Dispose()
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {gameResult} → 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
+                    _gameHashHistory.Clear()
                     Return False  ' 다음 매크로 항목으로
                 End If
 
@@ -778,6 +796,10 @@ Namespace MacroAutoControl
             RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: {sideText} 탐색 중 (깊이:{item.AIDepth}, 시간:{item.AITime:F0}s)...", currentRepeat, totalRepeat)
             Application.DoEvents()
 
+            ' 게임 수준 해시 히스토리 주입 (동일구간 반복 금지)
+            _gameHashHistory.Add(board.ZobristHash)
+            board.InjectGameHistory(_gameHashHistory)
+
             Dim result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
 
             If Not result.BestMove.HasValue Then
@@ -802,6 +824,7 @@ Namespace MacroAutoControl
                         Dim retryBoard = recognizer.GetBoardState(m)
                         If retryBoard IsNot Nothing Then
                             board = retryBoard
+                            board.InjectGameHistory(_gameHashHistory)
                             result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
                         End If
                     Catch
@@ -814,6 +837,7 @@ Namespace MacroAutoControl
                 If Not result.BestMove.HasValue Then
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
+                    _gameHashHistory.Clear()
                     Return False  ' 다음 매크로 항목으로
                 End If
             End If

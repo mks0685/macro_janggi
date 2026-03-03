@@ -23,6 +23,7 @@ Namespace MacroAutoControl
         Private WithEvents btnMacroDown As Button
         Private WithEvents btnMacroSave As Button
         Private WithEvents btnMacroLoad As Button
+        Private WithEvents btnForceMyTurn As Button
         Private nudDelay As NumericUpDown
         Private nudThreshold As NumericUpDown
         Private cboMouseButton As ComboBox
@@ -37,6 +38,7 @@ Namespace MacroAutoControl
         Private nudAIDepth As NumericUpDown
         Private nudAITime As NumericUpDown
         Private WithEvents btnAIAdd As Button
+        Private WithEvents btnPrevImage As Button
         Private WithEvents btnImageTest As Button
         Private WithEvents btnAITest As Button
 
@@ -76,6 +78,7 @@ Namespace MacroAutoControl
         Private Const RIGHT_PANEL_WIDTH As Integer = 380
         Private ReadOnly _settingsPath As String = IO.Path.Combine(Application.StartupPath, "window_settings.txt")
         Private ReadOnly _lastMacroPath As String = IO.Path.Combine(Application.StartupPath, "last_macro.txt")
+        Private ReadOnly _macroDir As String = IO.Path.Combine(Application.StartupPath, "Macro")
         Private _currentMacroFile As String = ""
 
         ' 윈도우 복원용 (Normal 상태의 위치/크기 저장)
@@ -174,7 +177,7 @@ Namespace MacroAutoControl
             grpMacro = New GroupBox() With {
                 .Text = "2. 매크로 리스트",
                 .Location = New Point(5, currentY),
-                .Size = New Size(pw, 564),
+                .Size = New Size(pw, 592),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             pnlRight.Controls.Add(grpMacro)
@@ -361,11 +364,23 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(btnAIAdd)
             gy += rowH
 
-            ' 옵션 행 4: 이미지 테스트 + AI 테스트
-            btnImageTest = New Button() With {
-                .Text = "이미지 테스트",
+            ' 옵션 행 4: 이전 이미지 + 이미지 테스트 + AI 테스트
+            Dim testBtnW = CInt((pw - 30) / 3)
+
+            btnPrevImage = New Button() With {
+                .Text = "◀ 이전",
                 .Location = New Point(10, gy),
-                .Size = New Size(halfW, 25),
+                .Size = New Size(testBtnW, 25),
+                .Anchor = AnchorStyles.Top Or AnchorStyles.Left,
+                .BackColor = Color.FromArgb(230, 230, 210),
+                .Font = New Font(Me.Font, FontStyle.Bold)
+            }
+            grpMacro.Controls.Add(btnPrevImage)
+
+            btnImageTest = New Button() With {
+                .Text = "다음 ▶",
+                .Location = New Point(10 + testBtnW + 4, gy),
+                .Size = New Size(testBtnW, 25),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left,
                 .BackColor = Color.FromArgb(220, 240, 200),
                 .Font = New Font(Me.Font, FontStyle.Bold)
@@ -373,9 +388,9 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(btnImageTest)
 
             btnAITest = New Button() With {
-                .Text = "AI 테스트 ▶",
-                .Location = New Point(10 + halfW + 4, gy),
-                .Size = New Size(halfW, 25),
+                .Text = "AI 테스트",
+                .Location = New Point(10 + (testBtnW + 4) * 2, gy),
+                .Size = New Size(testBtnW, 25),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Right,
                 .BackColor = Color.FromArgb(200, 220, 255),
                 .Font = New Font(Me.Font, FontStyle.Bold)
@@ -438,6 +453,18 @@ Namespace MacroAutoControl
             }
             grpMacro.Controls.Add(btnMacroLoad)
             gy += 32
+
+            ' 내차례 강제 지정 버튼
+            btnForceMyTurn = New Button() With {
+                .Text = "내차례 강제 지정 ▶",
+                .Location = New Point(10, gy),
+                .Size = New Size(pw - 22, 25),
+                .BackColor = Color.FromArgb(255, 230, 200),
+                .Font = New Font(Me.Font, FontStyle.Bold),
+                .Enabled = False
+            }
+            grpMacro.Controls.Add(btnForceMyTurn)
+            gy += 28
 
             ' 백그라운드 클릭 체크박스
             chkBackground = New CheckBox() With {
@@ -794,6 +821,54 @@ Namespace MacroAutoControl
             btnMacroRun.Enabled = (_macroItems.Count > 0 AndAlso _targetWindow IsNot Nothing)
             btnMacroSave.Enabled = (_macroItems.Count > 0)
             UpdateStatus($"AI 항목 추가: {name} (깊이:{depth}, 시간:{time:F0}s)")
+        End Sub
+
+        Private Sub btnForceMyTurn_Click(sender As Object, e As EventArgs) Handles btnForceMyTurn.Click
+            _macroRunner.ForceMyTurn()
+            UpdateStatus("내차례 강제 지정 → AI가 즉시 탐색합니다.")
+        End Sub
+
+        Private Sub btnPrevImage_Click(sender As Object, e As EventArgs) Handles btnPrevImage.Click
+            btnPrevImage.Enabled = False
+            Try
+                If Not _isDroppedImage OrElse _droppedImagePath Is Nothing Then
+                    UpdateStatus("이전 이미지: 드롭된 이미지가 없습니다.")
+                    Return
+                End If
+
+                Dim dir = IO.Path.GetDirectoryName(_droppedImagePath)
+                Dim exts = {".png", ".jpg", ".jpeg", ".bmp"}
+                Dim allFiles = IO.Directory.GetFiles(dir).
+                    Where(Function(f) exts.Contains(IO.Path.GetExtension(f).ToLower())).
+                    OrderBy(Function(f) f).ToArray()
+
+                Dim curIdx = Array.IndexOf(allFiles, _droppedImagePath)
+                Dim prevIdx = curIdx - 1
+                If prevIdx < 0 Then
+                    UpdateStatus("이전 이미지: 첫 번째 이미지입니다.")
+                    Return
+                End If
+
+                Dim prevPath = allFiles(prevIdx)
+                Try
+                    Dim bmp As New Bitmap(prevPath)
+                    picPreview.Image = Nothing
+                    _screenshot?.Dispose()
+                    _screenshot = bmp
+                    _isDroppedImage = True
+                    _droppedImagePath = prevPath
+                    picPreview.Image = _screenshot
+                    UpdateStatus($"이미지 로드: {IO.Path.GetFileName(prevPath)} ({prevIdx + 1}/{allFiles.Length})")
+                    Application.DoEvents()
+                Catch ex As Exception
+                    UpdateStatus($"이미지 로드 오류: {ex.Message}")
+                    Return
+                End Try
+
+                RunAITestOnCurrentImage(runAI:=False)
+            Finally
+                btnPrevImage.Enabled = True
+            End Try
         End Sub
 
         Private Sub btnImageTest_Click(sender As Object, e As EventArgs) Handles btnImageTest.Click
@@ -1359,6 +1434,8 @@ Namespace MacroAutoControl
                 If Not String.IsNullOrEmpty(_currentMacroFile) Then
                     dlg.InitialDirectory = IO.Path.GetDirectoryName(_currentMacroFile)
                     dlg.FileName = IO.Path.GetFileNameWithoutExtension(_currentMacroFile)
+                Else
+                    dlg.InitialDirectory = _macroDir
                 End If
 
                 If dlg.ShowDialog() = DialogResult.OK Then
@@ -1382,6 +1459,8 @@ Namespace MacroAutoControl
                 dlg.Filter = "매크로 파일 (*.macro)|*.macro"
                 If Not String.IsNullOrEmpty(_currentMacroFile) Then
                     dlg.InitialDirectory = IO.Path.GetDirectoryName(_currentMacroFile)
+                Else
+                    dlg.InitialDirectory = _macroDir
                 End If
 
                 If dlg.ShowDialog() = DialogResult.OK Then
@@ -1545,6 +1624,7 @@ Namespace MacroAutoControl
         Private Sub SetMacroRunningUI(running As Boolean)
             btnMacroRun.Enabled = Not running
             btnMacroStop.Enabled = running
+            btnForceMyTurn.Enabled = running
             btnMacroAdd.Enabled = Not running
             btnMacroDelete.Enabled = Not running
             btnMacroUp.Enabled = Not running
@@ -1624,6 +1704,7 @@ Namespace MacroAutoControl
 
         Protected Overrides Sub OnLoad(e As EventArgs)
             MyBase.OnLoad(e)
+            IO.Directory.CreateDirectory(_macroDir)
             RefreshWindowList()
             RefreshMonitorList()
             LoadLastMacro()

@@ -8,3 +8,6 @@ obj/
 
 # PowerShell scripts (utility)
 *.ps1
+
+# Windows nul device artifact
+nul

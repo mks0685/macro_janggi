@@ -240,7 +240,8 @@ Namespace MacroAutoControl.Capture
                     Dim spacing = (lines(j) - lines(i)) / CDbl(n - 1)
                     If Math.Abs(spacing - expectedSpacing) > expectedSpacing * 0.3 Then Continue For
 
-                    Dim expected = Enumerable.Range(0, n).Select(Function(k) lines(i) + CInt(k * spacing)).ToArray()
+                    Dim startLine = lines(i)
+                    Dim expected = Enumerable.Range(0, n).Select(Function(k) startLine + CInt(k * spacing)).ToArray()
                     Dim totalErr As Double = 0
                     For Each exp In expected
                         totalErr += lines.Min(Function(l) Math.Abs(l - exp))

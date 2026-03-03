@@ -18,6 +18,7 @@ Namespace MacroAutoControl.AI
     Public Module Search
 
         Private Const INF As Integer = 999999
+        Private Const REPETITION_PENALTY As Integer = 900000
         Private Const TT_EXACT As Integer = 0
         Private Const TT_ALPHA As Integer = 1
         Private Const TT_BETA As Integer = 2
@@ -179,6 +180,7 @@ Namespace MacroAutoControl.AI
 
             Dim bestScore = -(INF + 1)
             Dim bestMove As ((Integer, Integer), (Integer, Integer))? = Nothing
+            Dim bestIsRepetition = False
             Dim legalCount = 0
             Dim newDepth = depth - 1 + extension
 
@@ -196,6 +198,18 @@ Namespace MacroAutoControl.AI
                 End If
 
                 legalCount += 1
+
+                ' 반복 수 감지: 히스토리에 1회 이상 등장 = 2번째 동일 국면 = 반복 금지
+                If board.IsRepetition(1) Then
+                    Dim repScore = -(REPETITION_PENALTY - ply)
+                    board.UndoMove()
+                    If repScore > bestScore Then
+                        bestScore = repScore
+                        bestMove = move
+                        bestIsRepetition = True
+                    End If
+                    Continue For
+                End If
 
                 ' Futility Pruning
                 If futilityOk AndAlso Not isCapture Then
@@ -237,6 +251,7 @@ Namespace MacroAutoControl.AI
                 If score > bestScore Then
                     bestScore = score
                     bestMove = move
+                    bestIsRepetition = False
                 End If
                 If score > alpha Then alpha = score
                 If alpha >= beta Then
@@ -262,18 +277,20 @@ Namespace MacroAutoControl.AI
 
             If legalCount = 0 Then Return -(INF - ply)
 
-            ' TT 저장
-            Dim ttFlag As Integer
-            If bestScore <= origAlpha Then
-                ttFlag = TT_ALPHA
-            ElseIf bestScore >= beta Then
-                ttFlag = TT_BETA
-            Else
-                ttFlag = TT_EXACT
+            ' TT 저장 (반복 점수는 경로 의존적이므로 TT에 저장하지 않음)
+            If Not bestIsRepetition Then
+                Dim ttFlag As Integer
+                If bestScore <= origAlpha Then
+                    ttFlag = TT_ALPHA
+                ElseIf bestScore >= beta Then
+                    ttFlag = TT_BETA
+                Else
+                    ttFlag = TT_EXACT
+                End If
+                _tt(ttKey) = New TTEntry With {
+                    .Depth = depth, .Score = bestScore, .Flag = ttFlag, .BestMove = bestMove
+                }
             End If
-            _tt(ttKey) = New TTEntry With {
-                .Depth = depth, .Score = bestScore, .Flag = ttFlag, .BestMove = bestMove
-            }
 
             Return bestScore
         End Function
