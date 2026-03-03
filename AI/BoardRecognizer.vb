@@ -357,8 +357,16 @@ Namespace MacroAutoControl.Capture
         End Function
 
         Private Function DetectCellColor(cellImage As Mat) As String
+            ' 기물 중앙 30% 영역만 사용
+            Dim ch = cellImage.Rows, cw = cellImage.Cols
+            Dim marginX = CInt(cw * 0.35)
+            Dim marginY = CInt(ch * 0.35)
+            Dim centerRect As New OpenCvSharp.Rect(marginX, marginY, cw - marginX * 2, ch - marginY * 2)
+            If centerRect.Width < 4 OrElse centerRect.Height < 4 Then centerRect = New OpenCvSharp.Rect(0, 0, cw, ch)
+            Dim center = cellImage(centerRect)
+
             Dim hsv As New Mat()
-            Cv2.CvtColor(cellImage, hsv, ColorConversionCodes.BGR2HSV)
+            Cv2.CvtColor(center, hsv, ColorConversionCodes.BGR2HSV)
 
             Dim mr1 As New Mat(), mr2 As New Mat()
             Cv2.InRange(hsv, New Scalar(0, 40, 60), New Scalar(12, 255, 255), mr1)
@@ -369,11 +377,16 @@ Namespace MacroAutoControl.Capture
             Cv2.InRange(hsv, New Scalar(85, 40, 60), New Scalar(135, 255, 255), mb)
             Dim bluePx = Cv2.CountNonZero(mb)
 
-            Dim total = cellImage.Rows * cellImage.Cols
-            Dim minPx = Math.Max(10, total * 0.02)
+            Dim total = center.Rows * center.Cols
 
-            If redPx > minPx AndAlso redPx > bluePx * 1.3 Then Return CHO
-            If bluePx > minPx AndAlso bluePx > redPx * 1.3 Then Return HAN
+            ' 30% 이상 파란색이면 초(CHO), 30% 이상 빨간색이면 한(HAN)
+            If bluePx >= total * 0.3 Then Return CHO
+            If redPx >= total * 0.3 Then Return HAN
+
+            ' 비율 미달 시 상대 비교
+            Dim minPx = Math.Max(10, total * 0.02)
+            If redPx > minPx AndAlso redPx > bluePx * 1.3 Then Return HAN
+            If bluePx > minPx AndAlso bluePx > redPx * 1.3 Then Return CHO
             Return Nothing
         End Function
 
@@ -417,7 +430,7 @@ Namespace MacroAutoControl.Capture
                 End If
             Next
             If bestScore >= 0.7 Then
-                bestMatch = VerifyColorSide(cellImage, bestMatch)
+                ' 높은 확신도: 글자 모양(템플릿) 우선 신뢰, 색상 검증 생략
                 Return bestMatch
             End If
 
@@ -439,6 +452,7 @@ Namespace MacroAutoControl.Capture
                 Next
             Next
             If bestScore >= 0.65 Then
+                ' 중간 확신도: 색상으로 보조 검증
                 bestMatch = VerifyColorSide(cellImage, bestMatch)
                 Return bestMatch
             End If
@@ -740,7 +754,8 @@ Namespace MacroAutoControl.Capture
         ''' </summary>
         Private Function CountRingGlowPixels(hsv As Mat, cx As Integer, cy As Integer,
                                               innerR As Integer, outerR As Integer) As Integer
-            Dim glowCount = 0
+            Dim totalV As Long = 0
+            Dim sampleCount = 0
             Dim imgH = hsv.Rows, imgW = hsv.Cols
 
             ' 링 영역을 2px 간격으로 촘촘하게 샘플링
@@ -756,15 +771,14 @@ Namespace MacroAutoControl.Capture
                     Dim pixel(2) As Byte
                     Runtime.InteropServices.Marshal.Copy(
                         hsv.Data + (py * CInt(hsv.Step()) + px * 3), pixel, 0, 3)
-                    Dim h = CInt(pixel(0)), s = CInt(pixel(1)), v = CInt(pixel(2))
+                    Dim v = CInt(pixel(2))
 
-                    ' 빛남 효과: 노란~금색 (H:15~35) + 채도 있음(S>40) + 밝음(V>200)
-                    If h >= 15 AndAlso h <= 35 AndAlso s > 40 AndAlso v > 200 Then
-                        glowCount += 1
-                    End If
+                    totalV += v
+                    sampleCount += 1
                 Next
             Next
-            Return glowCount
+            If sampleCount = 0 Then Return 0
+            Return CInt(totalV \ sampleCount)
         End Function
 
         ''' <summary>
@@ -783,24 +797,46 @@ Namespace MacroAutoControl.Capture
             Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
             If baseSize <= 0 Then baseSize = 60
             Dim innerR = CInt(baseSize * 0.42)
-            Dim outerR = CInt(baseSize * 0.72)
+            Dim outerR = CInt(baseSize * 0.52)
             If innerR < 18 Then innerR = 18
-            If outerR < 30 Then outerR = 30
+            If outerR < 22 Then outerR = 22
 
             Dim bestGlow = 0
             Dim bestRow = -1, bestCol = -1
             Dim secondGlow = 0
 
+            ' 졸/병/사용 축소 링
+            Dim smallInnerR = CInt(baseSize * 0.32)
+            Dim smallOuterR = CInt(baseSize * 0.42)
+            If smallInnerR < 14 Then smallInnerR = 14
+            If smallOuterR < 18 Then smallOuterR = 18
+            ' 궁용 확대 링
+            Dim bigInnerR = CInt(baseSize * 0.42)
+            Dim bigOuterR = CInt(baseSize * 0.52)
+            If bigInnerR < 18 Then bigInnerR = 18
+            If bigOuterR < 22 Then bigOuterR = 22
+
             For r = 0 To BOARD_ROWS - 1
                 For c = 0 To BOARD_COLS - 1
-                    If board.Grid(r)(c) = EMPTY Then Continue For
+                    Dim p = board.Grid(r)(c)
+                    If p = EMPTY Then Continue For
 
                     Dim screenR = TranslateRow(r)
                     Dim idx = screenR * BOARD_COLS + c
                     Dim cx = _gridPositions(idx)(0)
                     Dim cy = _gridPositions(idx)(1)
 
-                    Dim glow = CountRingGlowPixels(hsv, cx, cy, innerR, outerR)
+                    ' 기물별 링 크기
+                    Dim useInner = innerR, useOuter = outerR
+                    If p = CJ OrElse p = HB OrElse p = CS OrElse p = HS Then
+                        useInner = smallInnerR
+                        useOuter = smallOuterR
+                    ElseIf p = CK OrElse p = HK Then
+                        useInner = bigInnerR
+                        useOuter = bigOuterR
+                    End If
+
+                    Dim glow = CountRingGlowPixels(hsv, cx, cy, useInner, useOuter)
 
                     If glow > bestGlow Then
                         secondGlow = bestGlow
@@ -828,6 +864,63 @@ Namespace MacroAutoControl.Capture
             If HAN_PIECES.Contains(piece) Then side = HAN
 
             Return (bestRow, bestCol, side, bestGlow)
+        End Function
+
+        ''' <summary>
+        ''' 모든 기물의 glow 값을 반환 (디버그용)
+        ''' </summary>
+        Public Function GetAllGlowValues(image As Mat, board As Board) As List(Of (Row As Integer, Col As Integer, Piece As String, Glow As Integer))
+            Dim results As New List(Of (Row As Integer, Col As Integer, Piece As String, Glow As Integer))
+            If _gridPositions Is Nothing Then Return results
+
+            Dim hsv As New Mat()
+            Cv2.CvtColor(image, hsv, ColorConversionCodes.BGR2HSV)
+
+            Dim baseSize = Math.Max(_cellSize.Item1, _cellSize.Item2)
+            If baseSize <= 0 Then baseSize = 60
+            Dim innerR = CInt(baseSize * 0.42)
+            Dim outerR = CInt(baseSize * 0.52)
+            If innerR < 18 Then innerR = 18
+            If outerR < 22 Then outerR = 22
+
+            ' 졸/병/사용 축소 링
+            Dim smallInnerR = CInt(baseSize * 0.32)
+            Dim smallOuterR = CInt(baseSize * 0.42)
+            If smallInnerR < 14 Then smallInnerR = 14
+            If smallOuterR < 18 Then smallOuterR = 18
+            ' 궁용 확대 링
+            Dim bigInnerR = CInt(baseSize * 0.42)
+            Dim bigOuterR = CInt(baseSize * 0.52)
+            If bigInnerR < 18 Then bigInnerR = 18
+            If bigOuterR < 22 Then bigOuterR = 22
+
+            For r = 0 To BOARD_ROWS - 1
+                For c = 0 To BOARD_COLS - 1
+                    Dim p = board.Grid(r)(c)
+                    If p = EMPTY Then Continue For
+                    Dim screenR = TranslateRow(r)
+                    Dim idx = screenR * BOARD_COLS + c
+                    Dim cx = _gridPositions(idx)(0)
+                    Dim cy = _gridPositions(idx)(1)
+
+                    Dim useInner = innerR, useOuter = outerR
+                    If p = CJ OrElse p = HB OrElse p = CS OrElse p = HS Then
+                        useInner = smallInnerR
+                        useOuter = smallOuterR
+                    ElseIf p = CK OrElse p = HK Then
+                        useInner = bigInnerR
+                        useOuter = bigOuterR
+                    End If
+
+                    Dim glow = CountRingGlowPixels(hsv, cx, cy, useInner, useOuter)
+                    If glow > 0 Then
+                        results.Add((r, c, p, glow))
+                    End If
+                Next
+            Next
+            hsv.Dispose()
+            results.Sort(Function(a, b) b.Glow.CompareTo(a.Glow))
+            Return results
         End Function
 
         ' ───── 대기 화면 / 로비 감지 ─────

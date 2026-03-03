@@ -17,6 +17,7 @@ Namespace MacroAutoControl
         Public Event ProgressChanged(currentIndex As Integer, totalCount As Integer, itemName As String, status As String, currentRepeat As Integer, totalRepeat As Integer)
         Public Event MacroCompleted(success As Boolean, message As String)
         Public Event AIMoveVisualize(screenshot As Bitmap, fromX As Integer, fromY As Integer, toX As Integer, toY As Integer, moveInfo As String)
+        Public Event BoardPreviewUpdate(preview As Bitmap)
 
         Private _cancelRequested As Boolean
         Private _isRunning As Boolean
@@ -32,6 +33,7 @@ Namespace MacroAutoControl
 
         ' 내 차례 스크린샷 저장
         Private _watchDir As String = Nothing
+        Private _watchDateDir As String = Nothing
         Private _watchCounter As Integer = 0
 
         ' 게임 결과 팝업 템플릿
@@ -113,56 +115,9 @@ Namespace MacroAutoControl
             Dim pieceName = If(BoardRecognizer.PIECE_NAMES.ContainsKey(piece), BoardRecognizer.PIECE_NAMES(piece), piece)
 
             If hlSide = mySide Then
-                ' 내 기물이 하이라이트 → 1초 후 재캡처하여 재검사
-                Thread.Sleep(1000)
-                If _cancelRequested Then Return False
-
-                Dim ss2 = WindowFinder.CaptureWindow(targetWindow.Handle)
-                If ss2 Is Nothing Then
-                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재캡처실패)"
-                    Return False
-                End If
-
-                Dim mat2 As Mat = Nothing
-                Try
-                    mat2 = BitmapConverter.ToMat(ss2)
-                    If mat2.Channels() = 4 Then
-                        Dim bgr2 As New Mat()
-                        Cv2.CvtColor(mat2, bgr2, ColorConversionCodes.BGRA2BGR)
-                        mat2.Dispose()
-                        mat2 = bgr2
-                    End If
-                Catch
-                    ss2.Dispose()
-                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재캡처오류)"
-                    Return False
-                End Try
-
-                Dim board2 = recognizer.GetBoardState(mat2)
-                If board2 Is Nothing Then
-                    mat2.Dispose() : ss2.Dispose()
-                    glowPieceName = $"내빛남:{pieceName} glow={hlGlow}(재인식실패)"
-                    Return False
-                End If
-
-                Dim hl2 = recognizer.DetectHighlightedPiece(mat2, board2)
-                mat2.Dispose() : ss2.Dispose()
-
-                If hl2 Is Nothing Then
-                    glowPieceName = $"내빛남→재검사:빛남없음"
-                    If mySide = Constants.CHO Then Return True Else Return False
-                End If
-
-                Dim piece2 = board2.Grid(hl2.Value.Row)(hl2.Value.Col)
-                Dim name2 = If(BoardRecognizer.PIECE_NAMES.ContainsKey(piece2), BoardRecognizer.PIECE_NAMES(piece2), piece2)
-
-                If hl2.Value.Side = mySide Then
-                    glowPieceName = $"내빛남(재확인):{name2} glow={hl2.Value.GlowCount}"
-                    Return False
-                Else
-                    glowPieceName = $"내빛남→상대빛남:{name2} glow={hl2.Value.GlowCount}"
-                    Return True
-                End If
+                ' 내 기물이 하이라이트 → 상대 차례 (1초 후 메인 루프에서 재시도)
+                glowPieceName = $"내빛남:{pieceName} glow={hlGlow}"
+                Return False
             Else
                 ' 상대 기물이 하이라이트 → 상대가 마지막에 둔 수 → 내 차례
                 glowPieceName = $"상대빛남:{pieceName}({highlighted.Value.Row},{highlighted.Value.Col}) glow={hlGlow}"
@@ -195,160 +150,222 @@ Namespace MacroAutoControl
                                        index As Integer, totalCount As Integer,
                                        currentRepeat As Integer, totalRepeat As Integer) As Board
             Dim recognizer = GetRecognizer()
-            Dim pollCount = 0
 
-            While Not _cancelRequested
-                pollCount += 1
-                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
-                    $"AI: 내 차례 대기 중... ({pollCount})", currentRepeat, totalRepeat)
-                Application.DoEvents()
+            If _cancelRequested Then Return Nothing
 
-                ' 1초 대기 (100ms 단위로 취소 체크)
-                Dim waited = 0
-                While waited < 1000 AndAlso Not _cancelRequested
-                    Thread.Sleep(100)
-                    waited += 100
-                    Application.DoEvents()
-                End While
+            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                "AI: 내 차례 확인 중...", currentRepeat, totalRepeat)
+            Application.DoEvents()
 
-                If _cancelRequested Then Return Nothing
+            ' 캡처
+            Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
+            If screenshot Is Nothing Then Return Nothing
 
-                ' 캡처 (PrintWindow는 숨김 불필요)
-                Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
+            ' 게임 결과 팝업 감지
+            Dim gameResult = DetectGameResult(screenshot)
+            If gameResult IsNot Nothing Then
+                screenshot.Dispose()
+                _gameEndReason = gameResult
+                Return Nothing
+            End If
 
-                If screenshot Is Nothing Then Continue While
-
-                ' 게임 결과 팝업 감지
-                Dim gameResult = DetectGameResult(screenshot)
-                If gameResult IsNot Nothing Then
-                    screenshot.Dispose()
-                    _gameEndReason = gameResult
-                    Return Nothing
-                End If
-
-                ' Mat 변환
-                Dim mat As Mat = Nothing
-                Try
-                    mat = BitmapConverter.ToMat(screenshot)
-                    If mat.Channels() = 4 Then
-                        Dim bgr As New Mat()
-                        Cv2.CvtColor(mat, bgr, ColorConversionCodes.BGRA2BGR)
-                        mat.Dispose()
-                        mat = bgr
-                    End If
-                Catch ex As Exception
-                    screenshot.Dispose()
-                    Continue While
-                End Try
-
-                ' 보드 인식
-                Dim board = recognizer.GetBoardState(mat)
-
-                If board Is Nothing Then
+            ' Mat 변환
+            Dim mat As Mat = Nothing
+            Try
+                mat = BitmapConverter.ToMat(screenshot)
+                If mat.Channels() = 4 Then
+                    Dim bgr As New Mat()
+                    Cv2.CvtColor(mat, bgr, ColorConversionCodes.BGRA2BGR)
                     mat.Dispose()
-                    screenshot.Dispose()
-                    Continue While
+                    mat = bgr
                 End If
+            Catch ex As Exception
+                screenshot.Dispose()
+                Return Nothing
+            End Try
 
-                ' 진영 자동 감지: 하단 궁의 실제 색상(HSV)으로 판단
-                Dim mySide = item.AISide
-                If mySide = "AUTO" Then
-                    Dim detectedSide = recognizer.DetectMySideByBottomKingColor(mat)
-                    If detectedSide IsNot Nothing Then
-                        mySide = detectedSide
-                    Else
-                        mySide = Constants.CHO
-                    End If
+            ' 보드 인식
+            Dim board = recognizer.GetBoardState(mat)
+            If board Is Nothing Then
+                mat.Dispose()
+                screenshot.Dispose()
+                Return Nothing
+            End If
+
+            ' 진영 자동 감지
+            Dim mySide = item.AISide
+            If mySide = "AUTO" Then
+                Dim detectedSide = recognizer.DetectMySideByBottomKingColor(mat)
+                If detectedSide IsNot Nothing Then
+                    mySide = detectedSide
+                Else
+                    mySide = Constants.CHO
                 End If
+            End If
+
+            ' 보드 프리뷰 표시
+            Dim gridPos2 = recognizer.GetGridPositions()
+            If gridPos2 IsNot Nothing Then
+                Try
+                    Dim hlPiece = recognizer.DetectHighlightedPiece(mat, board)
+                    Dim preview = New Bitmap(screenshot)
+                    Using g = Graphics.FromImage(preview)
+                        g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
+                        If hlPiece.HasValue Then
+                            Dim hr = hlPiece.Value.Row
+                            Dim hc = hlPiece.Value.Col
+                            Dim sr = recognizer.TranslateRow(hr)
+                            Dim si = sr * Constants.BOARD_COLS + hc
+                            If si >= 0 AndAlso si < gridPos2.Length Then
+                                Dim hx = gridPos2(si)(0), hy = gridPos2(si)(1)
+                                Using pen As New Pen(Color.FromArgb(220, 0, 0, 0), 4)
+                                    g.DrawEllipse(pen, hx - 26, hy - 26, 52, 52)
+                                End Using
+                            End If
+                        End If
+                        For r = 0 To Constants.BOARD_ROWS - 1
+                            For c = 0 To Constants.BOARD_COLS - 1
+                                Dim piece = board.Grid(r)(c)
+                                If piece = Constants.EMPTY Then Continue For
+                                Dim screenR = recognizer.TranslateRow(r)
+                                Dim idx2 = screenR * Constants.BOARD_COLS + c
+                                If idx2 < 0 OrElse idx2 >= gridPos2.Length Then Continue For
+                                Dim px = gridPos2(idx2)(0)
+                                Dim py = gridPos2(idx2)(1)
+                                If Constants.CHO_PIECES.Contains(piece) Then
+                                    Using pen As New Pen(Color.FromArgb(200, 0, 120, 255), 3)
+                                        g.DrawEllipse(pen, px - 22, py - 22, 44, 44)
+                                    End Using
+                                ElseIf Constants.HAN_PIECES.Contains(piece) Then
+                                    Using pen As New Pen(Color.FromArgb(200, 255, 60, 60), 3)
+                                        g.DrawEllipse(pen, px - 22, py - 22, 44, 44)
+                                    End Using
+                                End If
+                                Dim pName = ""
+                                BoardRecognizer.PIECE_NAMES.TryGetValue(piece, pName)
+                                Dim shortName = If(pName.Length >= 2, pName.Substring(1), pName)
+                                Using font As New Font("맑은 고딕", 7, FontStyle.Bold)
+                                    Dim sz = g.MeasureString(shortName, font)
+                                    Dim txtX = px - sz.Width / 2
+                                    Dim txtY = py - 22 - sz.Height
+                                    Using bgBrush As New SolidBrush(Color.FromArgb(180, 0, 0, 0))
+                                        g.FillRectangle(bgBrush, txtX - 1, txtY - 1, sz.Width + 2, sz.Height + 1)
+                                    End Using
+                                    g.DrawString(shortName, font, Brushes.White, txtX, txtY)
+                                End Using
+                            Next
+                        Next
+                    End Using
+                    RaiseEvent BoardPreviewUpdate(preview)
+                    Application.DoEvents()
+                Catch
+                End Try
+            End If
+
+            ' 빛남 감지
+            Dim gridPos = recognizer.GetGridPositions()
+            Dim cellSize = recognizer.GetCellSize()
+            Dim glowPiece As String = Nothing
+            Dim isMyTurn = False
+            If gridPos IsNot Nothing Then
+                isMyTurn = HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, targetWindow, glowPiece)
+            End If
+
+            If Not isMyTurn Then
+                ' 내 차례가 아님 → 다음 매크로 항목으로 넘기기
                 Dim dbgSide = If(mySide = Constants.CHO, "초", "한")
                 RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
-                    $"AI: 진영={dbgSide} 대기 중... ({pollCount})", currentRepeat, totalRepeat)
+                    $"AI: 내 차례 아님 ({dbgSide}, {If(glowPiece, "빛남없음")}) → 다음", currentRepeat, totalRepeat)
                 Application.DoEvents()
+                mat.Dispose()
+                screenshot.Dispose()
+                Return Nothing
+            End If
 
-                ' 빛남 감지
-                Dim gridPos = recognizer.GetGridPositions()
-                Dim cellSize = recognizer.GetCellSize()
-                Dim glowPiece As String = Nothing
-                If gridPos IsNot Nothing AndAlso HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, targetWindow, glowPiece) Then
-                    ' 내 차례 감지! 스크린샷 저장
-                    If _watchDir IsNot Nothing Then
-                        Try
-                            _watchCounter += 1
-                            Dim savePath = IO.Path.Combine(_watchDir, $"{_watchCounter.ToString("D4")}.jpg")
-                            screenshot.Save(savePath, System.Drawing.Imaging.ImageFormat.Jpeg)
-                        Catch
-                        End Try
+            ' 내 차례 감지! 스크린샷 저장 (첫 저장 시 번호 폴더 생성)
+            If _watchDateDir IsNot Nothing Then
+                Try
+                    If _watchDir Is Nothing Then
+                        Dim maxNum = 0
+                        For Each d In IO.Directory.GetDirectories(_watchDateDir)
+                            Dim dn = IO.Path.GetFileName(d)
+                            Dim num As Integer
+                            If Integer.TryParse(dn, num) Then
+                                If num > maxNum Then maxNum = num
+                            End If
+                        Next
+                        _watchDir = IO.Path.Combine(_watchDateDir, (maxNum + 1).ToString("D3"))
+                        IO.Directory.CreateDirectory(_watchDir)
+                        Console.WriteLine($"[알림] 스크린샷 저장 폴더: {_watchDir}")
                     End If
+                    _watchCounter += 1
+                    Dim savePath = IO.Path.Combine(_watchDir, $"{_watchCounter.ToString("D4")}.jpg")
+                    screenshot.Save(savePath, System.Drawing.Imaging.ImageFormat.Jpeg)
+                Catch
+                End Try
+            End If
 
-                    ' 상대 수 애니메이션 완료 대기 후 재캡처
-                    mat.Dispose()
-                    screenshot.Dispose()
+            ' 상대 수 애니메이션 완료 대기 후 재캡처
+            mat.Dispose()
+            screenshot.Dispose()
 
-                    Dim sideDbg = If(mySide = Constants.CHO, "초", "한")
+            Dim sideDbg2 = If(mySide = Constants.CHO, "초", "한")
+            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                $"AI: 내 차례 감지 ({sideDbg2}, 빛남:{glowPiece}) → 대기...", currentRepeat, totalRepeat)
+            Application.DoEvents()
+
+            ' 1.5초 대기 (상대 기물 이동 애니메이션 완료)
+            Dim w2 = 0
+            While w2 < 1500 AndAlso Not _cancelRequested
+                Thread.Sleep(100)
+                w2 += 100
+                Application.DoEvents()
+            End While
+            If _cancelRequested Then Return Nothing
+
+            ' 재캡처 + 재인식 → 0.5초 후 한번 더 확인
+            Dim finalBoard As Board = Nothing
+            For confirm = 1 To 2
+                Dim ss2 = WindowFinder.CaptureWindow(targetWindow.Handle)
+                If ss2 Is Nothing Then Continue For
+
+                Dim mat2 As Mat = Nothing
+                Try
+                    mat2 = BitmapConverter.ToMat(ss2)
+                    If mat2.Channels() = 4 Then
+                        Dim bgr2 As New Mat()
+                        Cv2.CvtColor(mat2, bgr2, ColorConversionCodes.BGRA2BGR)
+                        mat2.Dispose()
+                        mat2 = bgr2
+                    End If
+                Catch
+                    ss2.Dispose()
+                    Continue For
+                End Try
+
+                finalBoard = recognizer.GetBoardState(mat2)
+                mat2.Dispose()
+                ss2.Dispose()
+
+                If confirm = 1 AndAlso finalBoard IsNot Nothing Then
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
-                        $"AI: 내 차례 감지 ({sideDbg}, 빛남:{glowPiece}) → 대기...", currentRepeat, totalRepeat)
+                        $"AI: 상대 수 확인 중...", currentRepeat, totalRepeat)
                     Application.DoEvents()
-
-                    ' 1.5초 대기 (상대 기물 이동 애니메이션 완료)
-                    Dim w2 = 0
-                    While w2 < 1500 AndAlso Not _cancelRequested
+                    Dim w3 = 0
+                    While w3 < 500 AndAlso Not _cancelRequested
                         Thread.Sleep(100)
-                        w2 += 100
+                        w3 += 100
                         Application.DoEvents()
                     End While
                     If _cancelRequested Then Return Nothing
-
-                    ' 재캡처 + 재인식 → 0.5초 후 한번 더 확인
-                    Dim finalBoard As Board = Nothing
-                    For confirm = 1 To 2
-                        Dim ss2 = WindowFinder.CaptureWindow(targetWindow.Handle)
-                        If ss2 Is Nothing Then Continue For
-
-                        Dim mat2 As Mat = Nothing
-                        Try
-                            mat2 = BitmapConverter.ToMat(ss2)
-                            If mat2.Channels() = 4 Then
-                                Dim bgr2 As New Mat()
-                                Cv2.CvtColor(mat2, bgr2, ColorConversionCodes.BGRA2BGR)
-                                mat2.Dispose()
-                                mat2 = bgr2
-                            End If
-                        Catch
-                            ss2.Dispose()
-                            Continue For
-                        End Try
-
-                        finalBoard = recognizer.GetBoardState(mat2)
-                        mat2.Dispose()
-                        ss2.Dispose()
-
-                        If confirm = 1 AndAlso finalBoard IsNot Nothing Then
-                            ' 0.5초 후 한번 더 확인
-                            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
-                                $"AI: 상대 수 확인 중...", currentRepeat, totalRepeat)
-                            Application.DoEvents()
-                            Dim w3 = 0
-                            While w3 < 500 AndAlso Not _cancelRequested
-                                Thread.Sleep(100)
-                                w3 += 100
-                                Application.DoEvents()
-                            End While
-                            If _cancelRequested Then Return Nothing
-                        End If
-                    Next
-
-                    If finalBoard IsNot Nothing Then
-                        Return finalBoard
-                    Else
-                        Return board
-                    End If
                 End If
+            Next
 
-                mat.Dispose()
-                screenshot.Dispose()
-            End While
-
-            Return Nothing
+            If finalBoard IsNot Nothing Then
+                Return finalBoard
+            Else
+                Return board
+            End If
         End Function
 
         ''' <summary>
@@ -377,28 +394,11 @@ Namespace MacroAutoControl
 
             ' 내 차례 스크린샷 저장 폴더 초기화
             _watchCounter = 0
-            Dim exeDir = IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)
-            ' 기존 watch_ 폴더 중 마지막 번호 찾기
+            _watchDir = Nothing
+            Dim baseDir = "D:\images\macro_janggi"
             Dim dateStr = DateTime.Now.ToString("yyyy-MM-dd")
-            Dim watchBase = $"watch_{dateStr}"
-            Dim maxNum = 0
-            If IO.Directory.Exists(exeDir) Then
-                For Each d In IO.Directory.GetDirectories(exeDir, $"{watchBase}_*")
-                    Dim name = IO.Path.GetFileName(d)
-                    Dim parts = name.Split("_"c)
-                    Dim num As Integer
-                    If parts.Length > 0 AndAlso Integer.TryParse(parts(parts.Length - 1), num) Then
-                        If num > maxNum Then maxNum = num
-                    End If
-                Next
-            End If
-            _watchDir = IO.Path.Combine(exeDir, $"{watchBase}_{(maxNum + 1).ToString("D3")}")
-            IO.Directory.CreateDirectory(_watchDir)
-            Console.WriteLine($"[알림] 스크린샷 저장 폴더: {_watchDir}")
-
-            ' 마우스 원래 위치 저장
-            Dim savedCursorPos As NativeMethods.APIPOINT
-            NativeMethods.GetCursorPos(savedCursorPos)
+            _watchDateDir = IO.Path.Combine(baseDir, $"watch_{dateStr}")
+            IO.Directory.CreateDirectory(_watchDateDir)
 
             Dim infinite = (repeatCount = 0)
             Dim totalRepeat = If(infinite, 0, repeatCount)
@@ -525,8 +525,6 @@ Namespace MacroAutoControl
             Finally
                 _isRunning = False
                 _currentAIItem = Nothing
-                ' 마우스 원래 위치로 복귀
-                NativeMethods.SetCursorPos(savedCursorPos.X, savedCursorPos.Y)
                 ' 취소로 인한 종료 시에도 UI 복원 보장
                 If _cancelRequested Then
                     RaiseEvent MacroCompleted(False, "매크로 중지됨")
@@ -714,9 +712,9 @@ Namespace MacroAutoControl
             RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 차례 대기...", currentRepeat, totalRepeat)
             Application.DoEvents()
 
-            ' 상대 차례 대기 (1초)
+            ' AI 수 실행 후 대기 (2초)
             Dim dw = 0
-            While dw < 1000 AndAlso Not _cancelRequested
+            While dw < 2000 AndAlso Not _cancelRequested
                 Thread.Sleep(100)
                 dw += 100
                 Application.DoEvents()

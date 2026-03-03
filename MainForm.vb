@@ -41,6 +41,8 @@ Namespace MacroAutoControl
 
         ' AI 보드 인식기 (테스트용)
         Private _boardRecognizer As MacroAutoControl.Capture.BoardRecognizer = Nothing
+        Private _previousDropBoard As MacroAutoControl.Engine.Board = Nothing
+        Private _isDroppedImage As Boolean = False
 
         ' UI 컨트롤 - 모니터 선택
         Private lstMonitors As ListBox
@@ -86,6 +88,7 @@ Namespace MacroAutoControl
             AddHandler _macroRunner.ProgressChanged, AddressOf MacroRunner_ProgressChanged
             AddHandler _macroRunner.MacroCompleted, AddressOf MacroRunner_MacroCompleted
             AddHandler _macroRunner.AIMoveVisualize, AddressOf MacroRunner_AIMoveVisualize
+            AddHandler _macroRunner.BoardPreviewUpdate, AddressOf MacroRunner_BoardPreviewUpdate
             RestoreWindowSettings()
             InstallKeyboardHook()
         End Sub
@@ -782,21 +785,24 @@ Namespace MacroAutoControl
         End Sub
 
         Private Sub btnAITest_Click(sender As Object, e As EventArgs) Handles btnAITest.Click
-            If Not AutoSelectJanggiWindow() Then Return
-
             btnAITest.Enabled = False
             Try
-                Dim bmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
-                If bmp Is Nothing Then
-                    UpdateStatus("AI 테스트: 캡처 실패")
-                    Return
-                End If
+                ' 현재 이미지가 없으면 캡처
+                If _screenshot Is Nothing Then
+                    If Not AutoSelectJanggiWindow() Then Return
 
-                ' 스크린샷 업데이트
-                picPreview.Image = Nothing
-                _screenshot?.Dispose()
-                _screenshot = bmp
-                picPreview.Image = _screenshot
+                    Dim bmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                    If bmp Is Nothing Then
+                        UpdateStatus("AI 테스트: 캡처 실패")
+                        Return
+                    End If
+
+                    picPreview.Image = Nothing
+                    _screenshot?.Dispose()
+                    _screenshot = bmp
+                    _isDroppedImage = False
+                    picPreview.Image = _screenshot
+                End If
 
                 RunAITestOnCurrentImage()
             Finally
@@ -807,7 +813,7 @@ Namespace MacroAutoControl
         ''' <summary>
         ''' 현재 _screenshot 이미지로 AI 테스트 실행
         ''' </summary>
-        Private Sub RunAITestOnCurrentImage()
+        Private Sub RunAITestOnCurrentImage(Optional runAI As Boolean = True)
             If _screenshot Is Nothing Then
                 UpdateStatus("AI 테스트: 이미지 없음")
                 Return
@@ -844,26 +850,8 @@ Namespace MacroAutoControl
                     Return
                 End If
 
-                ' AI 설정 - 내 진영 자동 감지
-                ' 보드가 뒤집혔으면 원래 화면에서 한(HAN)이 아래에 있었으므로 내 진영 = 한
-                Dim side As String = Nothing
-                If _boardRecognizer.IsBoardFlipped Then
-                    side = HAN
-                Else
-                    For r = 7 To 9
-                        For c = 3 To 5
-                            Dim piece = board.Grid(r)(c)
-                            If piece = CK Then
-                                side = CHO
-                                Exit For
-                            ElseIf piece = HK Then
-                                side = HAN
-                                Exit For
-                            End If
-                        Next
-                        If side IsNot Nothing Then Exit For
-                    Next
-                End If
+                ' AI 설정 - 내 진영 자동 감지 (하단 궁 색상 기준)
+                Dim side = _boardRecognizer.DetectMySideByBottomKingColor(mat)
                 If side Is Nothing Then
                     side = CHO
                 End If
@@ -871,140 +859,274 @@ Namespace MacroAutoControl
                 Dim depth = CInt(nudAIDepth.Value)
                 Dim time = CDbl(nudAITime.Value)
 
-                ' 내 기물 확인 표시
+                ' 기물 + 마지막 이동 표시
                 Dim gridPos = _boardRecognizer.GetGridPositions()
                 If gridPos IsNot Nothing Then
+                    ' 현재 이미지에서 빛나는(glow) 기물 감지
+                    Dim highlighted = _boardRecognizer.DetectHighlightedPiece(mat, board)
+
+                    ' 마지막 이동 기물이 내 기물로 감지되면 1초 후 재시도 (드랍 이미지는 재캡처 불필요)
+                    If highlighted.HasValue AndAlso _targetWindow IsNot Nothing AndAlso Not _isDroppedImage Then
+                        Dim hlPiece = board.Grid(highlighted.Value.Row)(highlighted.Value.Col)
+                        Dim myPiecesCheck = If(side = CHO, CHO_PIECES, HAN_PIECES)
+                        If myPiecesCheck.Contains(hlPiece) Then
+                            UpdateStatus("감지 재시도: 1초 대기...")
+                            Application.DoEvents()
+                            Threading.Thread.Sleep(1000)
+                            Dim retryBmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                            If retryBmp IsNot Nothing Then
+                                Dim retryMat = OpenCvSharp.Extensions.BitmapConverter.ToMat(retryBmp)
+                                If retryMat.Channels() = 4 Then
+                                    Dim bgr2 As New OpenCvSharp.Mat()
+                                    OpenCvSharp.Cv2.CvtColor(retryMat, bgr2, OpenCvSharp.ColorConversionCodes.BGRA2BGR)
+                                    retryMat.Dispose()
+                                    retryMat = bgr2
+                                End If
+                                Dim retryBoard = _boardRecognizer.GetBoardState(retryMat)
+                                If retryBoard IsNot Nothing Then
+                                    board = retryBoard
+                                    mat.Dispose()
+                                    mat = retryMat
+                                    picPreview.Image = Nothing
+                                    _screenshot?.Dispose()
+                                    _screenshot = retryBmp
+                                    picPreview.Image = _screenshot
+                                    gridPos = _boardRecognizer.GetGridPositions()
+                                    highlighted = _boardRecognizer.DetectHighlightedPiece(mat, board)
+                                Else
+                                    retryMat.Dispose()
+                                    retryBmp.Dispose()
+                                End If
+                            End If
+                        End If
+                    End If
+
+                    Dim allGlow = _boardRecognizer.GetAllGlowValues(mat, board)
+                    Dim glowMap As New Dictionary(Of (Integer, Integer), Integer)
+                    For Each gl In allGlow
+                        glowMap((gl.Row, gl.Col)) = gl.Glow
+                    Next
+
                     Dim preview = New Bitmap(_screenshot)
+                    Dim myPieces = If(side = CHO, CHO_PIECES, HAN_PIECES)
+                    Dim enemyPieces = If(side = CHO, HAN_PIECES, CHO_PIECES)
+                    Dim myCount = 0
+                    Dim enemyCount = 0
+                    Dim myPieceNames As New List(Of String)
+                    Dim moveInfo = ""
+
                     Using g = Graphics.FromImage(preview)
                         g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
-                        Dim myPieces = If(side = CHO, CHO_PIECES, HAN_PIECES)
-                        Dim enemyPieces = If(side = CHO, HAN_PIECES, CHO_PIECES)
-                        Dim myCount = 0
-                        Dim enemyCount = 0
-                        Dim myPieceNames As New List(Of String)
 
-                        For r = 0 To BOARD_ROWS - 1
-                            For c = 0 To BOARD_COLS - 1
-                                Dim piece = board.Grid(r)(c)
-                                If piece = EMPTY Then Continue For
-                                Dim screenR = _boardRecognizer.TranslateRow(r)
-                                Dim idx = screenR * BOARD_COLS + c
-                                Dim px = gridPos(idx)(0)
-                                Dim py = gridPos(idx)(1)
-                                Dim pName = ""
-                                MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(piece, pName)
-
-                                If myPieces.Contains(piece) Then
-                                    myCount += 1
-                                    If piece(1) <> "K"c Then myPieceNames.Add(pName)
-                                    ' 내 기물: 파란 테두리
-                                    Using pen As New Pen(Color.FromArgb(200, 0, 120, 255), 3)
-                                        g.DrawEllipse(pen, px - 22, py - 22, 44, 44)
-                                    End Using
-                                ElseIf enemyPieces.Contains(piece) Then
-                                    enemyCount += 1
-                                    ' 적 기물: 빨간 테두리
-                                    Using pen As New Pen(Color.FromArgb(150, 255, 60, 60), 2)
-                                        g.DrawEllipse(pen, px - 22, py - 22, 44, 44)
-                                    End Using
-                                End If
-
-                                ' 기물 이름 라벨
-                                Dim shortName = If(pName.Length >= 2, pName.Substring(1), pName)
-                                Using font As New Font("맑은 고딕", 8, FontStyle.Bold)
-                                    Dim sz = g.MeasureString(shortName, font)
-                                    Dim tx = px - sz.Width / 2
-                                    Dim ty = py - 24 - sz.Height
-                                    Using bgBrush As New SolidBrush(Color.FromArgb(180, 0, 0, 0))
-                                        g.FillRectangle(bgBrush, tx - 1, ty - 1, sz.Width + 2, sz.Height + 1)
-                                    End Using
-                                    Using textBrush As New SolidBrush(Color.White)
-                                        g.DrawString(shortName, font, textBrush, tx, ty)
-                                    End Using
+                        ' 마지막 이동 기물 표시 (검정 원)
+                        If highlighted.HasValue Then
+                            Dim hr = highlighted.Value.Row
+                            Dim hc = highlighted.Value.Col
+                            Dim sr = _boardRecognizer.TranslateRow(hr)
+                            Dim si = sr * BOARD_COLS + hc
+                            If si >= 0 AndAlso si < gridPos.Length Then
+                                Dim hx = gridPos(si)(0), hy = gridPos(si)(1)
+                                Using pen As New Pen(Color.FromArgb(220, 0, 0, 0), 4)
+                                    g.DrawEllipse(pen, hx - 26, hy - 26, 52, 52)
                                 End Using
+                            End If
+                        End If
+
+                        ' glow 검출 링 범위 계산
+                        Dim cellSz = _boardRecognizer.GetCellSize()
+                        Dim baseSize = Math.Max(cellSz.Item1, cellSz.Item2)
+                        If baseSize <= 0 Then baseSize = 60
+                        Dim innerR = CInt(baseSize * 0.42)
+                        Dim outerR = CInt(baseSize * 0.52)
+                        If innerR < 18 Then innerR = 18
+                        If outerR < 22 Then outerR = 22
+
+                        ' 졸/병/사용 축소 링
+                        Dim smallInnerR = CInt(baseSize * 0.32)
+                        Dim smallOuterR = CInt(baseSize * 0.42)
+                        If smallInnerR < 14 Then smallInnerR = 14
+                        If smallOuterR < 18 Then smallOuterR = 18
+                        ' 궁용 확대 링
+                        Dim bigInnerR = CInt(baseSize * 0.42)
+                        Dim bigOuterR = CInt(baseSize * 0.52)
+                        If bigInnerR < 18 Then bigInnerR = 18
+                        If bigOuterR < 22 Then bigOuterR = 22
+
+                        ' 기물 표시 (적 기물 먼저, 내 기물 나중에)
+                        For pass = 0 To 1
+                            For r = 0 To BOARD_ROWS - 1
+                                For c = 0 To BOARD_COLS - 1
+                                    Dim piece = board.Grid(r)(c)
+                                    If piece = EMPTY Then Continue For
+                                    Dim isMine = myPieces.Contains(piece)
+                                    ' pass 0: 적 기물, pass 1: 내 기물
+                                    If pass = 0 AndAlso isMine Then Continue For
+                                    If pass = 1 AndAlso Not isMine Then Continue For
+
+                                    Dim screenR = _boardRecognizer.TranslateRow(r)
+                                    Dim idx = screenR * BOARD_COLS + c
+                                    Dim px = gridPos(idx)(0)
+                                    Dim py = gridPos(idx)(1)
+
+                                    ' glow 검출 범위 (내원/외원: 갈색 점선)
+                                    Dim drawInner As Integer = innerR
+                                    Dim drawOuter As Integer = outerR
+                                    If piece = CJ OrElse piece = HB OrElse piece = CS OrElse piece = HS Then
+                                        drawInner = smallInnerR
+                                        drawOuter = smallOuterR
+                                    ElseIf piece = CK OrElse piece = HK Then
+                                        drawInner = bigInnerR
+                                        drawOuter = bigOuterR
+                                    End If
+                                    Using pen As New Pen(Color.FromArgb(150, 139, 90, 43), 1)
+                                        pen.DashStyle = Drawing2D.DashStyle.Dot
+                                        g.DrawEllipse(pen, px - drawInner, py - drawInner, drawInner * 2, drawInner * 2)
+                                        g.DrawEllipse(pen, px - drawOuter, py - drawOuter, drawOuter * 2, drawOuter * 2)
+                                    End Using
+                                    Dim pName = ""
+                                    MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(piece, pName)
+
+                                    ' 카운트는 pass 0(적) 또는 pass 1(내)에서 한번만
+                                    If pass = 1 AndAlso isMine Then
+                                        myCount += 1
+                                        If piece(1) <> "K"c Then myPieceNames.Add(pName)
+                                    ElseIf pass = 0 AndAlso Not isMine Then
+                                        enemyCount += 1
+                                    End If
+
+                                    ' 초=파란원, 한=빨간원 (졸/병/사는 작게)
+                                    Dim circleR As Integer = 22
+                                    If piece = CJ OrElse piece = HB OrElse piece = CS OrElse piece = HS Then
+                                        circleR = 16
+                                    End If
+                                    If CHO_PIECES.Contains(piece) Then
+                                        Using pen As New Pen(Color.FromArgb(200, 0, 120, 255), 3)
+                                            g.DrawEllipse(pen, px - circleR, py - circleR, circleR * 2, circleR * 2)
+                                        End Using
+                                    ElseIf HAN_PIECES.Contains(piece) Then
+                                        Using pen As New Pen(Color.FromArgb(200, 255, 60, 60), 3)
+                                            g.DrawEllipse(pen, px - circleR, py - circleR, circleR * 2, circleR * 2)
+                                        End Using
+                                    End If
+
+                                    ' 기물 이름 + glow 값
+                                    Dim shortName = If(pName.Length >= 2, pName.Substring(1), pName)
+                                    Dim glowVal = 0
+                                    glowMap.TryGetValue((r, c), glowVal)
+                                    Dim label = If(glowVal > 0, $"{shortName} {glowVal}", shortName)
+                                    Using font As New Font("맑은 고딕", 8, FontStyle.Bold)
+                                        Dim sz = g.MeasureString(label, font)
+                                        Dim tx = px - sz.Width / 2
+                                        Dim ty = py - 24 - sz.Height
+                                        Using bgBrush As New SolidBrush(Color.FromArgb(180, 0, 0, 0))
+                                            g.FillRectangle(bgBrush, tx - 1, ty - 1, sz.Width + 2, sz.Height + 1)
+                                        End Using
+                                        Dim textColor = If(glowVal > 0, Brushes.Yellow, Brushes.White)
+                                        g.DrawString(label, font, textColor, tx, ty)
+                                    End Using
+                                Next
                             Next
                         Next
 
-                        ' 상단에 기물 요약 표시
-                        Dim summary = $"[{sideText}] 내 기물 {myCount}개: {String.Join(" ", myPieceNames)}  |  적 기물 {enemyCount}개"
+                        ' 마지막 기물 기준 장군 감지
+                        Dim checkInfo = ""
+                        Dim inCheck = False
+                        If highlighted.HasValue Then
+                            Dim movedPiece = board.Grid(highlighted.Value.Row)(highlighted.Value.Col)
+                            Dim movedName = ""
+                            MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(movedPiece, movedName)
+                            moveInfo = $"  |  마지막: {movedName}"
+
+                            ' 마지막 기물의 진영 → 상대 진영이 장군 당했는지 확인
+                            Dim movedSide = If(CHO_PIECES.Contains(movedPiece), CHO, HAN)
+                            Dim targetSide = If(movedSide = CHO, HAN, CHO)
+                            If board.IsInCheck(targetSide) Then
+                                If targetSide = side Then
+                                    ' 내가 장군 당함 → 멍군 필요
+                                    inCheck = True
+                                    checkInfo = "  ★ 장군! 멍군필요"
+                                Else
+                                    ' 상대가 장군 당함
+                                    checkInfo = "  ★ 장군!"
+                                End If
+                            End If
+                        End If
+                        Dim summary = $"[{sideText}] 내 {myCount}개  적 {enemyCount}개{moveInfo}{checkInfo}"
+                        Dim summaryColor = If(inCheck, Color.FromArgb(255, 255, 80, 80), Color.FromArgb(255, 100, 255, 100))
                         Using font As New Font("맑은 고딕", 10, FontStyle.Bold)
                             Dim sz = g.MeasureString(summary, font)
                             Using bgBrush As New SolidBrush(Color.FromArgb(200, 0, 0, 0))
                                 g.FillRectangle(bgBrush, 4, 4, sz.Width + 8, sz.Height + 4)
                             End Using
-                            Using textBrush As New SolidBrush(Color.FromArgb(255, 100, 255, 100))
-                                g.DrawString(summary, font, textBrush, 8, 6)
-                            End Using
+                            g.DrawString(summary, font, New SolidBrush(summaryColor), 8, 6)
                         End Using
                     End Using
 
                     SetPreviewImage(preview)
-                    UpdateStatus($"AI 테스트: {sideText} 기물 확인 완료 - 탐색 시작...")
+                    UpdateStatus($"보드 인식: {sideText} 내 {myCount}개  적 {enemyCount}개{moveInfo}")
                     Application.DoEvents()
                 End If
 
                 ' AI 탐색
-                UpdateStatus($"AI 테스트: {sideText} 탐색 중 (깊이:{depth}, 시간:{time:F0}s)...")
-                Application.DoEvents()
+                If runAI Then
+                    Dim checkStatus = ""
+                    If board.IsInCheck(side) Then checkStatus = " [멍군 탐색]"
+                    UpdateStatus($"AI 테스트: {sideText}{checkStatus} 탐색 중 (깊이:{depth}, 시간:{time:F0}s)...")
+                    Application.DoEvents()
 
-                Dim result = AI.Search.FindBestMove(board, side, depth, time)
+                    Dim result = AI.Search.FindBestMove(board, side, depth, time)
 
-                If result.BestMove.HasValue AndAlso gridPos IsNot Nothing Then
-                    Dim bestMove = result.BestMove.Value
-                    Dim fromRow = bestMove.Item1.Item1
-                    Dim fromCol = bestMove.Item1.Item2
-                    Dim toRow = bestMove.Item2.Item1
-                    Dim toCol = bestMove.Item2.Item2
+                    If result.BestMove.HasValue AndAlso gridPos IsNot Nothing Then
+                        Dim bestMove = result.BestMove.Value
+                        Dim fromRow = bestMove.Item1.Item1
+                        Dim fromCol = bestMove.Item1.Item2
+                        Dim toRow = bestMove.Item2.Item1
+                        Dim toCol = bestMove.Item2.Item2
 
-                    Dim actualFromRow = _boardRecognizer.TranslateRow(fromRow)
-                    Dim actualToRow = _boardRecognizer.TranslateRow(toRow)
-                    Dim fromIdx = actualFromRow * BOARD_COLS + fromCol
-                    Dim toIdx = actualToRow * BOARD_COLS + toCol
-                    Dim fromX = gridPos(fromIdx)(0)
-                    Dim fromY = gridPos(fromIdx)(1)
-                    Dim toX = gridPos(toIdx)(0)
-                    Dim toY = gridPos(toIdx)(1)
+                        Dim actualFromRow = _boardRecognizer.TranslateRow(fromRow)
+                        Dim actualToRow = _boardRecognizer.TranslateRow(toRow)
+                        Dim fromIdx = actualFromRow * BOARD_COLS + fromCol
+                        Dim toIdx = actualToRow * BOARD_COLS + toCol
+                        Dim fromX = gridPos(fromIdx)(0)
+                        Dim fromY = gridPos(fromIdx)(1)
+                        Dim toX = gridPos(toIdx)(0)
+                        Dim toY = gridPos(toIdx)(1)
 
-                    ' 결과 시각화
-                    Dim preview = New Bitmap(_screenshot)
-                    Using g = Graphics.FromImage(preview)
-                        g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
-
-                        Using brush As New SolidBrush(Color.FromArgb(100, 0, 100, 255))
-                            g.FillEllipse(brush, fromX - 24, fromY - 24, 48, 48)
+                        Dim preview2 = New Bitmap(_screenshot)
+                        Using g = Graphics.FromImage(preview2)
+                            g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
+                            Using brush As New SolidBrush(Color.FromArgb(100, 0, 100, 255))
+                                g.FillEllipse(brush, fromX - 24, fromY - 24, 48, 48)
+                            End Using
+                            Using pen As New Pen(Color.Blue, 3)
+                                g.DrawEllipse(pen, fromX - 24, fromY - 24, 48, 48)
+                            End Using
+                            Using brush As New SolidBrush(Color.FromArgb(100, 255, 50, 0))
+                                g.FillEllipse(brush, toX - 24, toY - 24, 48, 48)
+                            End Using
+                            Using pen As New Pen(Color.Red, 3)
+                                g.DrawEllipse(pen, toX - 24, toY - 24, 48, 48)
+                            End Using
+                            Using pen As New Pen(Color.FromArgb(220, 255, 220, 0), 4)
+                                pen.EndCap = Drawing2D.LineCap.ArrowAnchor
+                                g.DrawLine(pen, fromX, fromY, toX, toY)
+                            End Using
                         End Using
-                        Using pen As New Pen(Color.Blue, 3)
-                            g.DrawEllipse(pen, fromX - 24, fromY - 24, 48, 48)
-                        End Using
+                        SetPreviewImage(preview2)
 
-                        Using brush As New SolidBrush(Color.FromArgb(100, 255, 50, 0))
-                            g.FillEllipse(brush, toX - 24, toY - 24, 48, 48)
-                        End Using
-                        Using pen As New Pen(Color.Red, 3)
-                            g.DrawEllipse(pen, toX - 24, toY - 24, 48, 48)
-                        End Using
-
-                        Using pen As New Pen(Color.FromArgb(220, 255, 220, 0), 4)
-                            pen.EndCap = Drawing2D.LineCap.ArrowAnchor
-                            g.DrawLine(pen, fromX, fromY, toX, toY)
-                        End Using
-                    End Using
-
-                    SetPreviewImage(preview)
-
-                    Dim pieceName = ""
-                    MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(board.Grid(fromRow)(fromCol), pieceName)
-                    Dim capturedPiece = board.Grid(toRow)(toCol)
-                    Dim captureInfo = ""
-                    If capturedPiece <> EMPTY Then
-                        Dim capName = ""
-                        MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(capturedPiece, capName)
-                        captureInfo = $" (잡기:{capName})"
+                        Dim pieceName = ""
+                        MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(board.Grid(fromRow)(fromCol), pieceName)
+                        Dim capturedPiece = board.Grid(toRow)(toCol)
+                        Dim captureInfo = ""
+                        If capturedPiece <> EMPTY Then
+                            Dim capName = ""
+                            MacroAutoControl.Capture.BoardRecognizer.PIECE_NAMES.TryGetValue(capturedPiece, capName)
+                            captureInfo = $" (잡기:{capName})"
+                        End If
+                        UpdateStatus($"AI 테스트: {sideText} {pieceName} ({fromRow},{fromCol})→({toRow},{toCol}){captureInfo} | 점수:{result.Score} 깊이:{result.Depth}")
+                    Else
+                        UpdateStatus("AI 테스트: 최적수 없음 (게임 종료 또는 착수 불가)")
                     End If
-
-                    UpdateStatus($"AI 테스트: {sideText} {pieceName} ({fromRow},{fromCol})→({toRow},{toCol}){captureInfo} | 점수:{result.Score} 깊이:{result.Depth}")
-                Else
-                    UpdateStatus("AI 테스트: 최적수 없음 (게임 종료 또는 착수 불가)")
                 End If
             Catch ex As Exception
                 UpdateStatus($"AI 테스트 오류: {ex.Message}")
@@ -1130,6 +1252,7 @@ Namespace MacroAutoControl
 
             If _macroRunner.IsRunning Then Return
 
+            _isDroppedImage = False
             Dim singleItem As New List(Of MacroItem) From {_macroItems(idx)}
             SetMacroRunningUI(True)
             _macroRunner.RunSequence(singleItem, _targetWindow, Me, chkBackground.Checked, 1)
@@ -1267,6 +1390,7 @@ Namespace MacroAutoControl
             ' UI 상태 변경
             SetMacroRunningUI(True)
 
+            _isDroppedImage = False
             Dim repeatCount = If(chkInfinite.Checked, 0, CInt(nudRepeatCount.Value))
             Dim startIdx = If(lstMacro.SelectedIndex >= 0, lstMacro.SelectedIndex, 0)
             _macroRunner.RunSequence(_macroItems, _targetWindow, Me, chkBackground.Checked, repeatCount, startIdx)
@@ -1298,6 +1422,15 @@ Namespace MacroAutoControl
             UpdateStatus(message)
             ' 실행 중 변경된 항목(깊이 등) 리스트 표시 갱신
             RefreshMacroList()
+        End Sub
+
+        Private Sub MacroRunner_BoardPreviewUpdate(preview As Bitmap)
+            If preview Is Nothing Then Return
+            Try
+                SetPreviewImage(preview)
+            Catch
+                preview?.Dispose()
+            End Try
         End Sub
 
         Private Sub MacroRunner_AIMoveVisualize(screenshot As Bitmap, fromX As Integer, fromY As Integer, toX As Integer, toY As Integer, moveInfo As String)
@@ -1404,6 +1537,7 @@ Namespace MacroAutoControl
                 picPreview.Image = Nothing
                 _screenshot?.Dispose()
                 _screenshot = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                _isDroppedImage = False
 
                 If _screenshot Is Nothing Then
                     UpdateStatus("캡처 실패. 창을 다시 선택해보세요.")
@@ -1549,13 +1683,14 @@ Namespace MacroAutoControl
                 picPreview.Image = Nothing
                 _screenshot?.Dispose()
                 _screenshot = bmp
+                _isDroppedImage = True
                 picPreview.Image = _screenshot
 
-                UpdateStatus($"이미지 로드: {IO.Path.GetFileName(path)} ({bmp.Width}x{bmp.Height}) → AI 테스트 시작...")
+                UpdateStatus($"이미지 로드: {IO.Path.GetFileName(path)} ({bmp.Width}x{bmp.Height})")
                 Application.DoEvents()
 
-                ' AI 테스트 실행
-                RunAITestOnCurrentImage()
+                ' 보드 인식만 실행 (AI 탐색 제외)
+                RunAITestOnCurrentImage(runAI:=False)
             Catch ex As Exception
                 UpdateStatus($"이미지 로드 오류: {ex.Message}")
             End Try
