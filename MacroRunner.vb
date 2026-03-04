@@ -38,11 +38,17 @@ Namespace MacroAutoControl
         ' 동일구간 반복 금지를 위한 게임 수준 해시 히스토리
         Private _gameHashHistory As New List(Of ULong)
 
+        ' 동일구간 반복 금지를 위한 AI 수 히스토리 (from, to)
+        Private _gameAIMoves As New List(Of ((Integer, Integer), (Integer, Integer)))
+
         ' 내 차례 스크린샷 저장
         Private _watchDir As String = Nothing
         Private _watchDateDir As String = Nothing
         Private _watchCounter As Integer = 0
         Private _watchPreviousBoard As Board = Nothing
+
+        ' 게임 결과 팝업 위치 (클릭용)
+        Private _lastPopupLocation As Drawing.Point? = Nothing
 
         ' 게임 결과 팝업 템플릿
         Private Shared ReadOnly TEMPLATES_DIR As String =
@@ -168,11 +174,28 @@ Namespace MacroAutoControl
 
                 Dim result = ButtonFinder.FindByTemplate(screenshot, templatePath, 0.75)
                 If result.Found Then
+                    _lastPopupLocation = result.Location
                     Return tpl(1)
                 End If
             Next
+            _lastPopupLocation = Nothing
             Return Nothing
         End Function
+
+        ''' <summary>
+        ''' 게임 결과 팝업 클릭하여 닫기
+        ''' </summary>
+        Private Sub ClickGameResultPopup(targetWindow As WindowFinder.WindowInfo, useBackground As Boolean)
+            If _lastPopupLocation.HasValue Then
+                ButtonClicker.ClickInWindow(targetWindow.Handle,
+                    _lastPopupLocation.Value.X, _lastPopupLocation.Value.Y, useBackground, ClickButton.Left)
+                Thread.Sleep(500)
+                ' 한번 더 클릭 (확인 버튼이 있을 수 있음)
+                ButtonClicker.ClickInWindow(targetWindow.Handle,
+                    _lastPopupLocation.Value.X, _lastPopupLocation.Value.Y, useBackground, ClickButton.Left)
+                _lastPopupLocation = Nothing
+            End If
+        End Sub
 
         ''' <summary>
         ''' 내 차례 감지: 내 기물 주변에 빛남 효과가 나타날 때까지 대기
@@ -210,6 +233,8 @@ Namespace MacroAutoControl
                 Dim gameResult = DetectGameResult(screenshot)
                 If gameResult IsNot Nothing Then
                     screenshot.Dispose()
+                    ' 팝업 클릭하여 닫기
+                    ClickGameResultPopup(targetWindow, False)
                     _gameEndReason = gameResult
                     Return Nothing
                 End If
@@ -596,6 +621,18 @@ Namespace MacroAutoControl
 
             Dim defaultWindow = targetWindow
 
+            ' 첫줄 항목에 창이 지정되어 있으면 그것을 기본 창으로 사용
+            If items.Count > 0 AndAlso Not String.IsNullOrEmpty(items(0).WindowTitle) Then
+                Dim windows = WindowFinder.GetAllVisibleWindows()
+                Dim matched = windows.FirstOrDefault(Function(w) w.Title = items(0).WindowTitle)
+                If matched Is Nothing Then
+                    matched = windows.FirstOrDefault(Function(w) w.Title.Contains(items(0).WindowTitle))
+                End If
+                If matched IsNot Nothing Then
+                    defaultWindow = matched
+                End If
+            End If
+
             Dim infinite = (repeatCount = 0)
             Dim totalRepeat = If(infinite, 0, repeatCount)
             Dim currentRepeat = 0
@@ -647,6 +684,7 @@ Namespace MacroAutoControl
                                 _gameEndReason = Nothing
                                 _recognizer?.ResetGrid()
                                 _gameHashHistory.Clear()
+                    _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
                                 RaiseEvent ProgressChanged(0, items.Count, "", $"게임 종료 → 재시작 대기 (3초)...", currentRepeat, totalRepeat)
                                 Application.DoEvents()
@@ -853,10 +891,11 @@ Namespace MacroAutoControl
                                  currentRepeat, totalRepeat)
             If board Is Nothing Then
                 If _gameEndReason IsNot Nothing Then
-                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {_gameEndReason} → 다음", currentRepeat, totalRepeat)
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {_gameEndReason} → 클릭 후 다음", currentRepeat, totalRepeat)
                     _gameEndReason = Nothing
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
@@ -893,9 +932,12 @@ Namespace MacroAutoControl
                 Dim gameResult = DetectGameResult(screenshot)
                 If gameResult IsNot Nothing Then
                     screenshot.Dispose()
-                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {gameResult} → 다음", currentRepeat, totalRepeat)
+                    ' 팝업 클릭하여 닫기
+                    ClickGameResultPopup(targetWindow, useBackground)
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {gameResult} → 클릭 후 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
@@ -950,7 +992,7 @@ Namespace MacroAutoControl
             _gameHashHistory.Add(board.ZobristHash)
             board.InjectGameHistory(_gameHashHistory)
 
-            Dim result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
+            Dim result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime, _gameAIMoves)
 
             If Not result.BestMove.HasValue Then
                 capturedBmp?.Dispose()
@@ -975,7 +1017,7 @@ Namespace MacroAutoControl
                         If retryBoard IsNot Nothing Then
                             board = retryBoard
                             board.InjectGameHistory(_gameHashHistory)
-                            result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
+                            result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime, _gameAIMoves)
                         End If
                     Catch
                     Finally
@@ -988,6 +1030,7 @@ Namespace MacroAutoControl
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
@@ -1109,6 +1152,9 @@ Namespace MacroAutoControl
 
             ' 도착지 클릭
             ButtonClicker.ClickInWindow(targetWindow.Handle, toScreenX, toScreenY, useBackground, ClickButton.Left)
+
+            ' AI 수 히스토리에 기록 (동일구간 반복 방지)
+            _gameAIMoves.Add((bestMove.Item1, bestMove.Item2))
 
             RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 차례 대기...", currentRepeat, totalRepeat)
             Application.DoEvents()

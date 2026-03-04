@@ -35,6 +35,10 @@ Namespace MacroAutoControl.AI
         Private _deadline As DateTime
         Private _cancelRequested As Boolean = False
 
+        ' 동일구간 반복 방지: 게임 수준 AI 수 히스토리
+        Private _gameMoves As List(Of ((Integer, Integer), (Integer, Integer)))
+        Private Const MOVE_REPEAT_PENALTY As Integer = 500000
+
         ''' <summary>외부에서 탐색 중단 요청</summary>
         Public Sub CancelSearch()
             _cancelRequested = True
@@ -199,6 +203,21 @@ Namespace MacroAutoControl.AI
 
                 legalCount += 1
 
+                ' 루트 레벨 동일구간 반복 감지: 같은 수를 다시 두면 페널티
+                If ply = 0 AndAlso _gameMoves IsNot Nothing AndAlso _gameMoves.Count > 0 Then
+                    Dim moveRepeatPenalty = GetMoveRepeatPenalty(fromPos, toPos)
+                    If moveRepeatPenalty > 0 Then
+                        Dim repScore = -(moveRepeatPenalty)
+                        board.UndoMove()
+                        If repScore > bestScore Then
+                            bestScore = repScore
+                            bestMove = move
+                            bestIsRepetition = True
+                        End If
+                        Continue For
+                    End If
+                End If
+
                 ' 반복 수 감지: 히스토리에 1회 이상 등장 = 2번째 동일 국면 = 반복 금지
                 If board.IsRepetition(1) Then
                     Dim repScore = -(REPETITION_PENALTY - ply)
@@ -295,6 +314,32 @@ Namespace MacroAutoControl.AI
             Return bestScore
         End Function
 
+        ''' <summary>
+        ''' 동일구간 반복 페널티 계산.
+        ''' - 마지막 수의 역수(왕복): MOVE_REPEAT_PENALTY (최대)
+        ''' - 이전에 같은 수를 둔 적 있음: MOVE_REPEAT_PENALTY / 2
+        ''' - 반복 아님: 0
+        ''' </summary>
+        Private Function GetMoveRepeatPenalty(fromPos As (Integer, Integer), toPos As (Integer, Integer)) As Integer
+            If _gameMoves Is Nothing OrElse _gameMoves.Count = 0 Then Return 0
+
+            ' 마지막 AI 수의 역수인지 (왕복 패턴: A→B 다음에 B→A)
+            Dim lastMove = _gameMoves(_gameMoves.Count - 1)
+            If lastMove.Item1.Equals(toPos) AndAlso lastMove.Item2.Equals(fromPos) Then
+                Return MOVE_REPEAT_PENALTY
+            End If
+
+            ' 같은 수를 이전에 둔 적 있는지
+            For i = _gameMoves.Count - 1 To 0 Step -1
+                Dim gm = _gameMoves(i)
+                If gm.Item1.Equals(fromPos) AndAlso gm.Item2.Equals(toPos) Then
+                    Return MOVE_REPEAT_PENALTY \ 2
+                End If
+            Next
+
+            Return 0
+        End Function
+
         Private Function SortKey(m As ((Integer, Integer), (Integer, Integer)),
                                   ttMove As ((Integer, Integer), (Integer, Integer))?,
                                   grid As String()(),
@@ -321,12 +366,16 @@ Namespace MacroAutoControl.AI
 
         Public Function FindBestMove(board As Board, side As String,
                                       Optional depth As Integer = 0,
-                                      Optional maxTime As Double = 0) As (BestMove As ((Integer, Integer), (Integer, Integer))?, Score As Integer, Depth As Integer)
+                                      Optional maxTime As Double = 0,
+                                      Optional gameMoves As List(Of ((Integer, Integer), (Integer, Integer))) = Nothing) As (BestMove As ((Integer, Integer), (Integer, Integer))?, Score As Integer, Depth As Integer)
             If depth = 0 Then depth = DEFAULT_SEARCH_DEPTH
             If maxTime = 0 Then maxTime = MAX_SEARCH_TIME
 
             _cancelRequested = False
             _deadline = DateTime.Now.AddSeconds(maxTime)
+
+            ' 동일구간 반복 방지용 게임 수 히스토리 설정
+            _gameMoves = gameMoves
 
             ' TT 크기 초과 시 정리
             If _tt.Count > TT_MAX_SIZE Then _tt.Clear()
