@@ -923,9 +923,11 @@ Namespace MacroAutoControl
             Dim baseName = IO.Path.GetFileNameWithoutExtension(macroFilePath)
             Dim imgFolder = IO.Path.Combine(dir, baseName)
 
-            If Not IO.Directory.Exists(imgFolder) Then
-                IO.Directory.CreateDirectory(imgFolder)
+            ' 기존 이미지 폴더 정리 후 재생성
+            If IO.Directory.Exists(imgFolder) Then
+                IO.Directory.Delete(imgFolder, True)
             End If
+            IO.Directory.CreateDirectory(imgFolder)
 
             Dim lines As New List(Of String)
             ' 첫 줄: 창 이름 (WINDOW| 접두사)

@@ -48,8 +48,7 @@ Namespace MacroAutoControl
         Private _isDroppedImage As Boolean = False
         Private _droppedImagePath As String = Nothing
 
-        ' UI 컨트롤 - 모니터 선택
-        Private lstMonitors As ListBox
+        ' UI 컨트롤 - 모니터 선택 (lstWindows에 통합)
 
         ' UI 컨트롤 - 실행
         Private grpActions As GroupBox
@@ -132,7 +131,7 @@ Namespace MacroAutoControl
             grpWindows = New GroupBox() With {
                 .Text = "1. 대상 선택 (더블클릭으로 선택+캡처)",
                 .Location = New Point(5, currentY),
-                .Size = New Size(pw, 210),
+                .Size = New Size(pw, 130),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             pnlRight.Controls.Add(grpWindows)
@@ -148,28 +147,11 @@ Namespace MacroAutoControl
 
             lstWindows = New ListBox() With {
                 .Location = New Point(10, 37),
-                .Size = New Size(pw - 22, 90),
+                .Size = New Size(pw - 22, 82),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             grpWindows.Controls.Add(lstWindows)
             AddHandler lstWindows.DoubleClick, AddressOf lstWindows_DoubleClick
-
-            ' 모니터 목록
-            Dim lblMonitors As New Label() With {
-                .Text = "모니터 (더블클릭으로 전체화면 캡처):",
-                .Location = New Point(10, 132),
-                .Size = New Size(pw - 22, 16),
-                .AutoSize = False
-            }
-            grpWindows.Controls.Add(lblMonitors)
-
-            lstMonitors = New ListBox() With {
-                .Location = New Point(10, 149),
-                .Size = New Size(pw - 22, 52),
-                .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
-            }
-            grpWindows.Controls.Add(lstMonitors)
-            AddHandler lstMonitors.DoubleClick, AddressOf lstMonitors_DoubleClick
 
             currentY += grpWindows.Height + 5
 
@@ -177,7 +159,7 @@ Namespace MacroAutoControl
             grpMacro = New GroupBox() With {
                 .Text = "2. 매크로 리스트",
                 .Location = New Point(5, currentY),
-                .Size = New Size(pw, 592),
+                .Size = New Size(pw, 561),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             pnlRight.Controls.Add(grpMacro)
@@ -196,14 +178,15 @@ Namespace MacroAutoControl
 
             picTemplate = New PictureBox() With {
                 .Location = New Point(10, gy),
-                .Size = New Size(pw - 22, 120),
+                .Size = New Size(pw - 22, 240),
                 .BorderStyle = BorderStyle.FixedSingle,
                 .SizeMode = PictureBoxSizeMode.Zoom,
                 .BackColor = Color.White,
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             grpMacro.Controls.Add(picTemplate)
-            gy += 124
+            AddHandler picTemplate.MouseDown, AddressOf PicTemplate_MouseDown
+            gy += 244
 
             ' 공통 레이아웃 상수 (pw=364 기준, 겹침 없이 배치)
             '  c1  c2        c3   c4       c5         btnX
@@ -212,18 +195,19 @@ Namespace MacroAutoControl
             Dim rowH = 27       ' 행 높이
             Dim btnW = 65       ' 우측 버튼 너비
             Dim btnX = pw - 12 - btnW  ' 우측 버튼 X
+            Dim lblW = 34        ' 라벨 너비
             Dim c1 = 8          ' 첫번째 라벨 X
-            Dim c2 = 62         ' 첫번째 입력 X
-            Dim c3 = 130        ' 두번째 라벨 X
-            Dim c4 = 162        ' 두번째 입력 X
-            Dim c5 = 216        ' 세번째 시작 X
+            Dim c2 = c1 + lblW  ' 첫번째 입력 X
+            Dim c3 = 108        ' 두번째 라벨 X
+            Dim c4 = c3 + lblW  ' 두번째 입력 X
+            Dim c5 = 198        ' 세번째 시작 X
 
             ' === 옵션 행 1: 클릭 항목 추가 ===
             ' [대기(ms): 54px][4px][nud 64px][4px][임계: 28px][4px][nud 48px][4px][cbo 63px][4px][btn 65px]
             Dim lblDelay As New Label() With {
-                .Text = "대기(ms):",
+                .Text = "대기",
                 .Location = New Point(c1, gy + 4),
-                .Size = New Size(52, 18),
+                .Size = New Size(lblW, 18),
                 .AutoSize = False
             }
             grpMacro.Controls.Add(lblDelay)
@@ -240,9 +224,9 @@ Namespace MacroAutoControl
             AddHandler nudDelay.ValueChanged, AddressOf nudDelay_ValueChanged
 
             Dim lblThresh As New Label() With {
-                .Text = "임계:",
+                .Text = "임계",
                 .Location = New Point(c3, gy + 4),
-                .Size = New Size(30, 18),
+                .Size = New Size(lblW, 18),
                 .AutoSize = False
             }
             grpMacro.Controls.Add(lblThresh)
@@ -278,9 +262,9 @@ Namespace MacroAutoControl
 
             ' === 옵션 행 2: 키전송 항목 추가 ===
             Dim lblKeyDelay As New Label() With {
-                .Text = "대기(ms):",
+                .Text = "대기",
                 .Location = New Point(c1, gy + 4),
-                .Size = New Size(52, 18),
+                .Size = New Size(lblW, 18),
                 .AutoSize = False
             }
             grpMacro.Controls.Add(lblKeyDelay)
@@ -323,7 +307,7 @@ Namespace MacroAutoControl
             ' === 옵션 행 3: AI 항목 추가 (행1과 열 정렬) ===
             ' [대기(ms): c1~c2][nud c2~c3][깊이: c3~c4][nud c4~c5][시간: c5~][nud ~btnX][btn]
             Dim lblAIDelay As New Label() With {
-                .Text = "대기(ms):", .Location = New Point(c1, gy + 4), .Size = New Size(52, 18), .AutoSize = False
+                .Text = "대기", .Location = New Point(c1, gy + 4), .Size = New Size(lblW, 18), .AutoSize = False
             }
             grpMacro.Controls.Add(lblAIDelay)
 
@@ -334,7 +318,7 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(nudAIDelay)
 
             Dim lblAIDepth As New Label() With {
-                .Text = "깊이:", .Location = New Point(c3, gy + 4), .Size = New Size(30, 18), .AutoSize = False
+                .Text = "깊이", .Location = New Point(c3, gy + 4), .Size = New Size(lblW, 18), .AutoSize = False
             }
             grpMacro.Controls.Add(lblAIDepth)
 
@@ -345,12 +329,12 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(nudAIDepth)
 
             Dim lblAITime As New Label() With {
-                .Text = "시간:", .Location = New Point(c5, gy + 4), .Size = New Size(30, 18), .AutoSize = False
+                .Text = "시간", .Location = New Point(c5, gy + 4), .Size = New Size(lblW, 18), .AutoSize = False
             }
             grpMacro.Controls.Add(lblAITime)
 
             nudAITime = New NumericUpDown() With {
-                .Location = New Point(c5 + 32, gy), .Size = New Size(btnX - c5 - 32 - 4, 25),
+                .Location = New Point(c5 + lblW, gy), .Size = New Size(btnX - c5 - lblW - 4, 25),
                 .Minimum = 1, .Maximum = 60, .Value = 10, .Increment = 5
             }
             grpMacro.Controls.Add(nudAITime)
@@ -409,71 +393,48 @@ Namespace MacroAutoControl
             AddHandler lstMacro.DoubleClick, AddressOf lstMacro_DoubleClick
             gy += 134
 
-            ' 삭제, 위로, 아래로
-            Dim thirdW = CInt((pw - 30) / 3)
+            ' 삭제, 위로, 아래로, SAVE, LOAD
+            Dim fifthW = CInt((pw - 38) / 5)
 
             btnMacroDelete = New Button() With {
                 .Text = "삭제",
                 .Location = New Point(10, gy),
-                .Size = New Size(thirdW, 26),
+                .Size = New Size(fifthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroDelete)
 
             btnMacroUp = New Button() With {
-                .Text = "▲ 위로",
-                .Location = New Point(10 + thirdW + 4, gy),
-                .Size = New Size(thirdW, 26),
+                .Text = "▲",
+                .Location = New Point(10 + (fifthW + 4) * 1, gy),
+                .Size = New Size(fifthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroUp)
 
             btnMacroDown = New Button() With {
-                .Text = "▼ 아래로",
-                .Location = New Point(10 + (thirdW + 4) * 2, gy),
-                .Size = New Size(thirdW, 26),
+                .Text = "▼",
+                .Location = New Point(10 + (fifthW + 4) * 2, gy),
+                .Size = New Size(fifthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroDown)
-            gy += 30
 
-            ' 저장/불러오기
             btnMacroSave = New Button() With {
-                .Text = "매크로 저장",
-                .Location = New Point(10, gy),
-                .Size = New Size(halfW, 28),
+                .Text = "SAVE",
+                .Location = New Point(10 + (fifthW + 4) * 3, gy),
+                .Size = New Size(fifthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroSave)
 
             btnMacroLoad = New Button() With {
-                .Text = "매크로 불러오기",
-                .Location = New Point(10 + halfW + 4, gy),
-                .Size = New Size(halfW, 28)
+                .Text = "LOAD",
+                .Location = New Point(10 + (fifthW + 4) * 4, gy),
+                .Size = New Size(fifthW, 26)
             }
             grpMacro.Controls.Add(btnMacroLoad)
-            gy += 32
-
-            ' 내차례 강제 지정 버튼
-            btnForceMyTurn = New Button() With {
-                .Text = "내차례 강제 지정 ▶",
-                .Location = New Point(10, gy),
-                .Size = New Size(pw - 22, 25),
-                .BackColor = Color.FromArgb(255, 230, 200),
-                .Font = New Font(Me.Font, FontStyle.Bold),
-                .Enabled = False
-            }
-            grpMacro.Controls.Add(btnForceMyTurn)
-            gy += 28
-
-            ' 백그라운드 클릭 체크박스
-            chkBackground = New CheckBox() With {
-                .Text = "백그라운드 클릭 (PostMessage)",
-                .Location = New Point(10, gy),
-                .Size = New Size(pw - 22, 25),
-                .Checked = False
-            }
-            grpMacro.Controls.Add(chkBackground)
+            gy += 30
 
             currentY += grpMacro.Height + 5
 
@@ -481,7 +442,7 @@ Namespace MacroAutoControl
             grpActions = New GroupBox() With {
                 .Text = "3. 실행",
                 .Location = New Point(5, currentY),
-                .Size = New Size(pw, 125),
+                .Size = New Size(pw, 178),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             pnlRight.Controls.Add(grpActions)
@@ -544,10 +505,30 @@ Namespace MacroAutoControl
             }
             grpActions.Controls.Add(btnMacroStop)
 
+            ' 백그라운드 클릭 체크박스
+            chkBackground = New CheckBox() With {
+                .Text = "백그라운드 클릭 (PostMessage)",
+                .Location = New Point(10, 52),
+                .Size = New Size(pw - 22, 22),
+                .Checked = False
+            }
+            grpActions.Controls.Add(chkBackground)
+
+            ' 내차례 강제 지정 버튼
+            btnForceMyTurn = New Button() With {
+                .Text = "내차례 강제 지정 ▶",
+                .Location = New Point(10, 76),
+                .Size = New Size(pw - 22, 25),
+                .BackColor = Color.FromArgb(255, 230, 200),
+                .Font = New Font(Me.Font, FontStyle.Bold),
+                .Enabled = False
+            }
+            grpActions.Controls.Add(btnForceMyTurn)
+
             ' 매크로 진행 상태
             lblMacroProgress = New Label() With {
                 .Text = "",
-                .Location = New Point(10, 52),
+                .Location = New Point(10, 105),
                 .Size = New Size(pw - 22, 65),
                 .ForeColor = Color.DarkGreen,
                 .Font = New Font("맑은 고딕", 9.0F, FontStyle.Bold),
@@ -739,6 +720,53 @@ Namespace MacroAutoControl
 
             Return New Rectangle(offsetX, offsetY, newW, newH)
         End Function
+
+        Private Sub PicTemplate_MouseDown(sender As Object, e As MouseEventArgs)
+            If e.Button <> MouseButtons.Right Then Return
+
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+
+            Dim item = _macroItems(idx)
+            If item.Image Is Nothing Then Return
+
+            Dim imgRect = GetImageRect(picTemplate, item.Image)
+            If imgRect.Width <= 0 OrElse imgRect.Height <= 0 Then Return
+
+            ' 이미지 영역 밖 클릭 시 무시
+            If e.X < imgRect.X OrElse e.X >= imgRect.X + imgRect.Width OrElse
+               e.Y < imgRect.Y OrElse e.Y >= imgRect.Y + imgRect.Height Then Return
+
+            ' 좌표 변환: picTemplate Zoom → 원본 이미지 좌표
+            Dim offsetX = CInt((e.X - imgRect.X) * item.Image.Width / imgRect.Width)
+            Dim offsetY = CInt((e.Y - imgRect.Y) * item.Image.Height / imgRect.Height)
+
+            ' 범위 제한
+            offsetX = Math.Max(0, Math.Min(offsetX, item.Image.Width - 1))
+            offsetY = Math.Max(0, Math.Min(offsetY, item.Image.Height - 1))
+
+            item.ClickOffsetX = offsetX
+            item.ClickOffsetY = offsetY
+
+            ' lblTemplate 업데이트
+            lblTemplate.Text = $"[{idx + 1}] {item.Name} ({item.Image.Width}x{item.Image.Height}, 클릭:{offsetX},{offsetY})"
+
+            ' 빨간 점 + 노란 십자 오버레이
+            Dim overlay = New Bitmap(item.Image)
+            Using g = Graphics.FromImage(overlay)
+                g.FillEllipse(Brushes.Red, offsetX - 4, offsetY - 4, 8, 8)
+                Using pen As New Pen(Color.Yellow, 1)
+                    g.DrawLine(pen, offsetX - 8, offsetY, offsetX + 8, offsetY)
+                    g.DrawLine(pen, offsetX, offsetY - 8, offsetX, offsetY + 8)
+                End Using
+            End Using
+            picTemplate.Image = overlay
+
+            ' 리스트 항목 텍스트도 갱신
+            lstMacro.Items(idx) = item.ToString()
+
+            UpdateStatus($"클릭 위치 변경: ({offsetX},{offsetY})")
+        End Sub
 
         ' =============================================
         ' 매크로 리스트 관리
@@ -1639,21 +1667,41 @@ Namespace MacroAutoControl
         ' =============================================
         Private Sub RefreshWindowList()
             lstWindows.Items.Clear()
-            Dim windows = WindowFinder.GetAllVisibleWindows()
 
+            ' 모니터 목록
+            For i = 0 To Screen.AllScreens.Length - 1
+                Dim scr = Screen.AllScreens(i)
+                Dim primary = If(scr.Primary, " [주]", "")
+                lstWindows.Items.Add($"[모니터 {i + 1}{primary}] {scr.Bounds.Width}x{scr.Bounds.Height} ({scr.Bounds.X},{scr.Bounds.Y})")
+            Next
+
+            ' 창 목록
+            Dim windows = WindowFinder.GetAllVisibleWindows()
             For Each w In windows.OrderBy(Function(x) x.Title)
                 If w.Title.Contains("설정") Then Continue For
                 If w.Title.Contains("매크로 자동 제어") Then Continue For
                 lstWindows.Items.Add($"[{w.Handle}] {w.Title} ({w.Bounds.Width}x{w.Bounds.Height})")
             Next
 
-            UpdateStatus($"총 {lstWindows.Items.Count}개 창을 찾았습니다.")
+            UpdateStatus($"총 {lstWindows.Items.Count}개 항목을 찾았습니다.")
         End Sub
 
         Private Sub lstWindows_DoubleClick(sender As Object, e As EventArgs)
             If lstWindows.SelectedItem Is Nothing Then Return
 
             Dim text = lstWindows.SelectedItem.ToString()
+
+            ' 모니터 항목 처리
+            If text.StartsWith("[모니터 ") Then
+                Dim numStr = text.Substring(4, text.IndexOf("]") - 4).Trim()
+                ' "[주]" 등 제거하고 숫자만 추출
+                Dim scrIdx = Integer.Parse(numStr.Split(" "c)(0)) - 1
+                If scrIdx < 0 OrElse scrIdx >= Screen.AllScreens.Length Then Return
+                CaptureMonitor(scrIdx)
+                Return
+            End If
+
+            ' 창 항목 처리
             Dim handleStr = text.Substring(1, text.IndexOf("]") - 1)
             Dim handle = New IntPtr(Long.Parse(handleStr))
 
@@ -1706,7 +1754,6 @@ Namespace MacroAutoControl
             MyBase.OnLoad(e)
             IO.Directory.CreateDirectory(_macroDir)
             RefreshWindowList()
-            RefreshMonitorList()
             LoadLastMacro()
         End Sub
 
@@ -1756,22 +1803,9 @@ Namespace MacroAutoControl
         End Sub
 
         ' =============================================
-        ' 모니터 관련
+        ' 모니터 캡처
         ' =============================================
-        Private Sub RefreshMonitorList()
-            lstMonitors.Items.Clear()
-            For i = 0 To Screen.AllScreens.Length - 1
-                Dim scr = Screen.AllScreens(i)
-                Dim primary = If(scr.Primary, " [주]", "")
-                lstMonitors.Items.Add($"모니터 {i + 1}{primary}: {scr.Bounds.Width}x{scr.Bounds.Height} ({scr.Bounds.X},{scr.Bounds.Y})")
-            Next
-        End Sub
-
-        Private Sub lstMonitors_DoubleClick(sender As Object, e As EventArgs)
-            If lstMonitors.SelectedIndex < 0 Then Return
-            Dim scrIdx = lstMonitors.SelectedIndex
-            If scrIdx >= Screen.AllScreens.Length Then Return
-
+        Private Sub CaptureMonitor(scrIdx As Integer)
             Dim scr = Screen.AllScreens(scrIdx)
 
             Try
