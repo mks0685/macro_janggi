@@ -23,6 +23,7 @@ Namespace MacroAutoControl
         Private WithEvents btnMacroDown As Button
         Private WithEvents btnMacroSave As Button
         Private WithEvents btnMacroLoad As Button
+        Private WithEvents btnScreenshot As Button
         Private WithEvents btnForceMyTurn As Button
         Private nudDelay As NumericUpDown
         Private nudThreshold As NumericUpDown
@@ -41,6 +42,14 @@ Namespace MacroAutoControl
         Private WithEvents btnPrevImage As Button
         Private WithEvents btnImageTest As Button
         Private WithEvents btnAITest As Button
+
+        ' 마스크 모드
+        Private WithEvents btnMaskToggle As Button
+        Private WithEvents btnMaskClear As Button
+        Private _maskMode As Boolean = False
+        Private _maskDragStart As Point
+        Private _maskDragCurrent As Point
+        Private _isMaskDragging As Boolean = False
 
         ' AI 보드 인식기 (테스트용)
         Private _boardRecognizer As MacroAutoControl.Capture.BoardRecognizer = Nothing
@@ -79,6 +88,7 @@ Namespace MacroAutoControl
         Private ReadOnly _lastMacroPath As String = IO.Path.Combine(Application.StartupPath, "last_macro.txt")
         Private ReadOnly _macroDir As String = IO.Path.Combine(Application.StartupPath, "Macro")
         Private _currentMacroFile As String = ""
+        Private _savedWindowTitle As String = Nothing
 
         ' 윈도우 복원용 (Normal 상태의 위치/크기 저장)
         Private _lastNormalBounds As Rectangle
@@ -152,6 +162,7 @@ Namespace MacroAutoControl
             }
             grpWindows.Controls.Add(lstWindows)
             AddHandler lstWindows.DoubleClick, AddressOf lstWindows_DoubleClick
+            AddHandler lstWindows.MouseDown, AddressOf lstWindows_MouseDown
 
             currentY += grpWindows.Height + 5
 
@@ -159,7 +170,7 @@ Namespace MacroAutoControl
             grpMacro = New GroupBox() With {
                 .Text = "2. 매크로 리스트",
                 .Location = New Point(5, currentY),
-                .Size = New Size(pw, 561),
+                .Size = New Size(pw, 587),
                 .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
             }
             pnlRight.Controls.Add(grpMacro)
@@ -186,7 +197,30 @@ Namespace MacroAutoControl
             }
             grpMacro.Controls.Add(picTemplate)
             AddHandler picTemplate.MouseDown, AddressOf PicTemplate_MouseDown
+            AddHandler picTemplate.MouseMove, AddressOf PicTemplate_MouseMove
+            AddHandler picTemplate.MouseUp, AddressOf PicTemplate_MouseUp
+            AddHandler picTemplate.Paint, AddressOf PicTemplate_Paint
             gy += 244
+
+            ' 마스크 버튼
+            Dim maskBtnW = CInt((pw - 26) / 2)
+            btnMaskToggle = New Button() With {
+                .Text = "Mask OFF",
+                .Location = New Point(10, gy),
+                .Size = New Size(maskBtnW, 23),
+                .BackColor = Color.FromArgb(220, 220, 220),
+                .FlatStyle = FlatStyle.Flat
+            }
+            grpMacro.Controls.Add(btnMaskToggle)
+
+            btnMaskClear = New Button() With {
+                .Text = "Mask 초기화",
+                .Location = New Point(10 + maskBtnW + 4, gy),
+                .Size = New Size(maskBtnW, 23),
+                .FlatStyle = FlatStyle.Flat
+            }
+            grpMacro.Controls.Add(btnMaskClear)
+            gy += 26
 
             ' 공통 레이아웃 상수 (pw=364 기준, 겹침 없이 배치)
             '  c1  c2        c3   c4       c5         btnX
@@ -391,6 +425,7 @@ Namespace MacroAutoControl
             grpMacro.Controls.Add(lstMacro)
             AddHandler lstMacro.SelectedIndexChanged, AddressOf lstMacro_SelectedIndexChanged
             AddHandler lstMacro.DoubleClick, AddressOf lstMacro_DoubleClick
+            AddHandler lstMacro.MouseDown, AddressOf lstMacro_MouseDown
             gy += 134
 
             ' 삭제, 위로, 아래로, SAVE, LOAD
@@ -514,10 +549,19 @@ Namespace MacroAutoControl
             }
             grpActions.Controls.Add(chkBackground)
 
+            ' 스크린샷 저장 버튼
+            btnScreenshot = New Button() With {
+                .Text = "스크린샷 저장",
+                .Location = New Point(10, 76),
+                .Size = New Size(pw - 22, 25),
+                .BackColor = Color.FromArgb(200, 220, 255)
+            }
+            grpActions.Controls.Add(btnScreenshot)
+
             ' 내차례 강제 지정 버튼
             btnForceMyTurn = New Button() With {
                 .Text = "내차례 강제 지정 ▶",
-                .Location = New Point(10, 76),
+                .Location = New Point(10, 104),
                 .Size = New Size(pw - 22, 25),
                 .BackColor = Color.FromArgb(255, 230, 200),
                 .Font = New Font(Me.Font, FontStyle.Bold),
@@ -528,7 +572,7 @@ Namespace MacroAutoControl
             ' 매크로 진행 상태
             lblMacroProgress = New Label() With {
                 .Text = "",
-                .Location = New Point(10, 105),
+                .Location = New Point(10, 133),
                 .Size = New Size(pw - 22, 65),
                 .ForeColor = Color.DarkGreen,
                 .Font = New Font("맑은 고딕", 9.0F, FontStyle.Bold),
@@ -702,6 +746,9 @@ Namespace MacroAutoControl
                 picTemplate.Image = _templateImage
                 lblTemplate.Text = $"템플릿: {w}x{h} px (클릭으로 위치 지정 가능)"
 
+                ' 선택된 항목이 있으면 템플릿 이미지 갱신
+                UpdateSelectedItemImage()
+
                 ShowPreviewWithHighlight(New Rectangle(left, top, w, h), Color.Blue)
                 UpdateStatus("템플릿 선택 완료. 클릭으로 위치 지정, '추가'로 매크로에 등록.")
             Catch
@@ -722,50 +769,205 @@ Namespace MacroAutoControl
         End Function
 
         Private Sub PicTemplate_MouseDown(sender As Object, e As MouseEventArgs)
-            If e.Button <> MouseButtons.Right Then Return
+            ' 우클릭: 클릭 위치 변경 (마스크 모드 무관하게 항상 처리)
+            If e.Button = MouseButtons.Right Then
+                Dim idx = lstMacro.SelectedIndex
+                If idx < 0 OrElse idx >= _macroItems.Count Then Return
+
+                Dim item = _macroItems(idx)
+                If item.Image Is Nothing OrElse item.IsAI Then Return
+
+                Dim imgRect = GetImageRect(picTemplate, item.Image)
+                If imgRect.Width <= 0 OrElse imgRect.Height <= 0 Then Return
+
+                ' 이미지 영역 밖 클릭 시 무시
+                If e.X < imgRect.X OrElse e.X >= imgRect.X + imgRect.Width OrElse
+                   e.Y < imgRect.Y OrElse e.Y >= imgRect.Y + imgRect.Height Then Return
+
+                ' 좌표 변환: picTemplate Zoom → 원본 이미지 좌표
+                Dim offsetX = CInt((e.X - imgRect.X) * item.Image.Width / imgRect.Width)
+                Dim offsetY = CInt((e.Y - imgRect.Y) * item.Image.Height / imgRect.Height)
+
+                ' 범위 제한
+                offsetX = Math.Max(0, Math.Min(offsetX, item.Image.Width - 1))
+                offsetY = Math.Max(0, Math.Min(offsetY, item.Image.Height - 1))
+
+                item.ClickOffsetX = offsetX
+                item.ClickOffsetY = offsetY
+
+                ' lblTemplate 업데이트
+                lblTemplate.Text = $"[{idx + 1}] {item.Name} ({item.Image.Width}x{item.Image.Height}, 클릭:{offsetX},{offsetY})"
+
+                ' Paint 이벤트에서 클릭 위치 + 마스크 함께 표시
+                picTemplate.Invalidate()
+
+                ' 리스트 항목 텍스트도 갱신
+                _updatingFromSelection = True
+                lstMacro.Items(idx) = $"{idx + 1}. {item}"
+                _updatingFromSelection = False
+
+                UpdateStatus($"클릭 위치 변경: ({offsetX},{offsetY})")
+                Return
+            End If
+
+            ' 마스크 모드에서 좌클릭 드래그
+            If _maskMode AndAlso e.Button = MouseButtons.Left Then
+                Dim mi = lstMacro.SelectedIndex
+                If mi < 0 OrElse mi >= _macroItems.Count Then Return
+                Dim itm = _macroItems(mi)
+                If itm.Image Is Nothing OrElse itm.IsAI Then Return
+
+                _maskDragStart = e.Location
+                _maskDragCurrent = e.Location
+                _isMaskDragging = True
+                Return
+            End If
+        End Sub
+
+        Private Sub PicTemplate_MouseMove(sender As Object, e As MouseEventArgs)
+            If Not _isMaskDragging Then Return
+            _maskDragCurrent = e.Location
+            picTemplate.Invalidate()
+        End Sub
+
+        Private Sub PicTemplate_MouseUp(sender As Object, e As MouseEventArgs)
+            If Not _isMaskDragging Then Return
+            _isMaskDragging = False
 
             Dim idx = lstMacro.SelectedIndex
             If idx < 0 OrElse idx >= _macroItems.Count Then Return
-
             Dim item = _macroItems(idx)
             If item.Image Is Nothing Then Return
 
             Dim imgRect = GetImageRect(picTemplate, item.Image)
             If imgRect.Width <= 0 OrElse imgRect.Height <= 0 Then Return
 
-            ' 이미지 영역 밖 클릭 시 무시
-            If e.X < imgRect.X OrElse e.X >= imgRect.X + imgRect.Width OrElse
-               e.Y < imgRect.Y OrElse e.Y >= imgRect.Y + imgRect.Height Then Return
+            ' Zoom 좌표 → 원본 이미지 좌표
+            Dim scaleX = CDbl(item.Image.Width) / imgRect.Width
+            Dim scaleY = CDbl(item.Image.Height) / imgRect.Height
 
-            ' 좌표 변환: picTemplate Zoom → 원본 이미지 좌표
-            Dim offsetX = CInt((e.X - imgRect.X) * item.Image.Width / imgRect.Width)
-            Dim offsetY = CInt((e.Y - imgRect.Y) * item.Image.Height / imgRect.Height)
+            Dim x1 = CInt((_maskDragStart.X - imgRect.X) * scaleX)
+            Dim y1 = CInt((_maskDragStart.Y - imgRect.Y) * scaleY)
+            Dim x2 = CInt((e.X - imgRect.X) * scaleX)
+            Dim y2 = CInt((e.Y - imgRect.Y) * scaleY)
 
-            ' 범위 제한
-            offsetX = Math.Max(0, Math.Min(offsetX, item.Image.Width - 1))
-            offsetY = Math.Max(0, Math.Min(offsetY, item.Image.Height - 1))
+            Dim left = Math.Max(0, Math.Min(x1, x2))
+            Dim top = Math.Max(0, Math.Min(y1, y2))
+            Dim right = Math.Min(item.Image.Width, Math.Max(x1, x2))
+            Dim bottom = Math.Min(item.Image.Height, Math.Max(y1, y2))
+            Dim w = right - left
+            Dim h = bottom - top
+            If w < 2 OrElse h < 2 Then Return
 
-            item.ClickOffsetX = offsetX
-            item.ClickOffsetY = offsetY
+            ' マスク ビットマップ초기화 (없으면 생성)
+            If item.Mask Is Nothing Then
+                item.Mask = New Bitmap(item.Image.Width, item.Image.Height)
+            End If
 
-            ' lblTemplate 업데이트
-            lblTemplate.Text = $"[{idx + 1}] {item.Name} ({item.Image.Width}x{item.Image.Height}, 클릭:{offsetX},{offsetY})"
-
-            ' 빨간 점 + 노란 십자 오버레이
-            Dim overlay = New Bitmap(item.Image)
-            Using g = Graphics.FromImage(overlay)
-                g.FillEllipse(Brushes.Red, offsetX - 4, offsetY - 4, 8, 8)
-                Using pen As New Pen(Color.Yellow, 1)
-                    g.DrawLine(pen, offsetX - 8, offsetY, offsetX + 8, offsetY)
-                    g.DrawLine(pen, offsetX, offsetY - 8, offsetX, offsetY + 8)
-                End Using
+            ' 마스크에 빨간 사각형 페인팅
+            Using g = Graphics.FromImage(item.Mask)
+                g.FillRectangle(Brushes.Red, left, top, w, h)
             End Using
-            picTemplate.Image = overlay
 
-            ' 리스트 항목 텍스트도 갱신
-            lstMacro.Items(idx) = item.ToString()
+            picTemplate.Invalidate()
+            UpdateStatus($"마스크 영역 추가: ({left},{top}) {w}x{h}")
+        End Sub
 
-            UpdateStatus($"클릭 위치 변경: ({offsetX},{offsetY})")
+        Private Sub PicTemplate_Paint(sender As Object, e As PaintEventArgs)
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            Dim item = _macroItems(idx)
+            If item.Image Is Nothing Then Return
+
+            Dim imgRect = GetImageRect(picTemplate, item.Image)
+            If imgRect.Width <= 0 OrElse imgRect.Height <= 0 Then Return
+
+            ' 기존 마스크 오버레이 표시
+            If item.Mask IsNot Nothing Then
+                Using maskOverlay As New Bitmap(item.Mask.Width, item.Mask.Height,
+                    Imaging.PixelFormat.Format32bppArgb)
+                    Dim mData = item.Mask.LockBits(
+                        New Rectangle(0, 0, item.Mask.Width, item.Mask.Height),
+                        Imaging.ImageLockMode.ReadOnly, Imaging.PixelFormat.Format32bppArgb)
+                    Dim oData = maskOverlay.LockBits(
+                        New Rectangle(0, 0, maskOverlay.Width, maskOverlay.Height),
+                        Imaging.ImageLockMode.WriteOnly, Imaging.PixelFormat.Format32bppArgb)
+                    Try
+                        Dim mBytes(mData.Stride * item.Mask.Height - 1) As Byte
+                        Dim oBytes(oData.Stride * maskOverlay.Height - 1) As Byte
+                        Runtime.InteropServices.Marshal.Copy(mData.Scan0, mBytes, 0, mBytes.Length)
+                        For py = 0 To item.Mask.Height - 1
+                            For px = 0 To item.Mask.Width - 1
+                                Dim mi = py * mData.Stride + px * 4
+                                If mBytes(mi + 2) > 200 Then ' R > 200
+                                    Dim oi = py * oData.Stride + px * 4
+                                    oBytes(oi) = 0       ' B
+                                    oBytes(oi + 1) = 0   ' G
+                                    oBytes(oi + 2) = 255  ' R
+                                    oBytes(oi + 3) = 100  ' A
+                                End If
+                            Next
+                        Next
+                        Runtime.InteropServices.Marshal.Copy(oBytes, 0, oData.Scan0, oBytes.Length)
+                    Finally
+                        item.Mask.UnlockBits(mData)
+                        maskOverlay.UnlockBits(oData)
+                    End Try
+                    e.Graphics.InterpolationMode = Drawing2D.InterpolationMode.NearestNeighbor
+                    e.Graphics.DrawImage(maskOverlay, imgRect)
+                End Using
+            End If
+
+            ' 클릭 위치 표시
+            If item.ClickOffsetX >= 0 Then
+                Dim scaleX2 = CDbl(imgRect.Width) / item.Image.Width
+                Dim scaleY2 = CDbl(imgRect.Height) / item.Image.Height
+                Dim cx = CInt(imgRect.X + item.ClickOffsetX * scaleX2)
+                Dim cy = CInt(imgRect.Y + item.ClickOffsetY * scaleY2)
+                e.Graphics.FillEllipse(Brushes.Red, cx - 4, cy - 4, 8, 8)
+                Using pen As New Pen(Color.Yellow, 1)
+                    e.Graphics.DrawLine(pen, cx - 8, cy, cx + 8, cy)
+                    e.Graphics.DrawLine(pen, cx, cy - 8, cx, cy + 8)
+                End Using
+            End If
+
+            ' 드래그 중 미리보기 사각형
+            If _isMaskDragging Then
+                Dim x = Math.Min(_maskDragStart.X, _maskDragCurrent.X)
+                Dim y = Math.Min(_maskDragStart.Y, _maskDragCurrent.Y)
+                Dim w = Math.Abs(_maskDragCurrent.X - _maskDragStart.X)
+                Dim h = Math.Abs(_maskDragCurrent.Y - _maskDragStart.Y)
+                If w >= 2 AndAlso h >= 2 Then
+                    Using brush As New SolidBrush(Color.FromArgb(80, 255, 0, 0))
+                        e.Graphics.FillRectangle(brush, x, y, w, h)
+                    End Using
+                    Using pen As New Pen(Color.Red, 2)
+                        pen.DashStyle = Drawing2D.DashStyle.Dash
+                        e.Graphics.DrawRectangle(pen, x, y, w, h)
+                    End Using
+                End If
+            End If
+        End Sub
+
+        Private Sub btnMaskToggle_Click(sender As Object, e As EventArgs) Handles btnMaskToggle.Click
+            _maskMode = Not _maskMode
+            If _maskMode Then
+                btnMaskToggle.Text = "Mask ON"
+                btnMaskToggle.BackColor = Color.FromArgb(255, 180, 180)
+            Else
+                btnMaskToggle.Text = "Mask OFF"
+                btnMaskToggle.BackColor = Color.FromArgb(220, 220, 220)
+            End If
+        End Sub
+
+        Private Sub btnMaskClear_Click(sender As Object, e As EventArgs) Handles btnMaskClear.Click
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            Dim item = _macroItems(idx)
+            item.Mask?.Dispose()
+            item.Mask = Nothing
+            picTemplate.Invalidate()
+            UpdateStatus("마스크 초기화됨")
         End Sub
 
         ' =============================================
@@ -790,6 +992,7 @@ Namespace MacroAutoControl
                 "",
                 _clickOffset.X,
                 _clickOffset.Y)
+            item.WindowTitle = If(_targetWindow IsNot Nothing, _targetWindow.Title, "")
 
             _macroItems.Add(item)
             RefreshMacroList()
@@ -813,17 +1016,35 @@ Namespace MacroAutoControl
                 Return
             End If
 
-            ' 키 전송 전용 항목: 1x1 투명 더미 이미지 사용
-            Dim dummyImg As New Bitmap(1, 1)
-            Dim item As New MacroItem(
-                $"키전송: {keys}",
-                dummyImg,
-                CInt(nudKeyDelay.Value),
-                0.0,
-                ClickButton.Left,
-                keys)
-            item.Threshold = 0  ' 임계값 0 = 이미지 찾기 건너뜀
-            dummyImg.Dispose()
+            Dim keyCount = _macroItems.Where(Function(m) Not String.IsNullOrEmpty(m.SendKeys)).Count() + 1
+            Dim item As MacroItem
+
+            If _templateImage IsNot Nothing Then
+                ' 패턴 인식 + 클릭 + 키 전송
+                Dim clickBtn = If(cboMouseButton.SelectedIndex = 1, ClickButton.Right, ClickButton.Left)
+                item = New MacroItem(
+                    $"키전송{keyCount}",
+                    _templateImage,
+                    CInt(nudKeyDelay.Value),
+                    nudThreshold.Value / 100.0,
+                    clickBtn,
+                    keys,
+                    _clickOffset.X,
+                    _clickOffset.Y)
+            Else
+                ' 키 전송 전용: 더미 이미지, 임계값 0
+                Dim dummyImg As New Bitmap(1, 1)
+                item = New MacroItem(
+                    $"키전송{keyCount}",
+                    dummyImg,
+                    CInt(nudKeyDelay.Value),
+                    0.0,
+                    ClickButton.Left,
+                    keys)
+                item.Threshold = 0
+                dummyImg.Dispose()
+            End If
+            item.WindowTitle = If(_targetWindow IsNot Nothing, _targetWindow.Title, "")
 
             _macroItems.Add(item)
             RefreshMacroList()
@@ -831,7 +1052,13 @@ Namespace MacroAutoControl
 
             btnMacroRun.Enabled = (_macroItems.Count > 0 AndAlso _targetWindow IsNot Nothing)
             btnMacroSave.Enabled = (_macroItems.Count > 0)
-            UpdateStatus($"키전송 항목 추가: {keys}")
+
+            If _templateImage IsNot Nothing AndAlso _screenshot IsNot Nothing Then
+                SetPreviewImage(_screenshot)
+            End If
+
+            Dim modeText = If(_templateImage IsNot Nothing, "패턴+클릭+키전송", "키전송만")
+            UpdateStatus($"키전송 항목 추가: {keys} ({modeText})")
         End Sub
 
         Private Sub btnAIAdd_Click(sender As Object, e As EventArgs) Handles btnAIAdd.Click
@@ -842,6 +1069,8 @@ Namespace MacroAutoControl
             ' AI 항목 추가
             Dim name = "AI수두기 (자동)"
             Dim item = MacroItem.CreateAI(name, delay, "AUTO", depth, time)
+            item.WindowTitle = If(_targetWindow IsNot Nothing, _targetWindow.Title, "")
+
             _macroItems.Add(item)
             RefreshMacroList()
             lstMacro.SelectedIndex = lstMacro.Items.Count - 1
@@ -849,6 +1078,31 @@ Namespace MacroAutoControl
             btnMacroRun.Enabled = (_macroItems.Count > 0 AndAlso _targetWindow IsNot Nothing)
             btnMacroSave.Enabled = (_macroItems.Count > 0)
             UpdateStatus($"AI 항목 추가: {name} (깊이:{depth}, 시간:{time:F0}s)")
+        End Sub
+
+        Private Sub btnScreenshot_Click(sender As Object, e As EventArgs) Handles btnScreenshot.Click
+            If _targetWindow Is Nothing Then
+                UpdateStatus("대상 창이 선택되지 않았습니다.")
+                Return
+            End If
+            Dim bmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
+            If bmp Is Nothing Then
+                UpdateStatus("스크린샷 캡처 실패")
+                Return
+            End If
+            Try
+                Dim exeDir = IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)
+                Dim captureDir = IO.Path.Combine(exeDir, "Capture")
+                IO.Directory.CreateDirectory(captureDir)
+                Dim fileName = DateTime.Now.ToString("yyyy-MM-dd_HHmmss") & ".jpg"
+                Dim savePath = IO.Path.Combine(captureDir, fileName)
+                bmp.Save(savePath, Imaging.ImageFormat.Jpeg)
+                UpdateStatus($"스크린샷 저장: {fileName}")
+            Catch ex As Exception
+                UpdateStatus($"스크린샷 저장 실패: {ex.Message}")
+            Finally
+                bmp.Dispose()
+            End Try
         End Sub
 
         Private Sub btnForceMyTurn_Click(sender As Object, e As EventArgs) Handles btnForceMyTurn.Click
@@ -1023,9 +1277,11 @@ Namespace MacroAutoControl
                     Return
                 End If
 
-                ' AI 설정 - 내 진영 자동 감지 (하단 궁 색상 기준)
-                Dim side = _boardRecognizer.DetectMySideByBottomKingColor(mat)
-                If side Is Nothing Then
+                ' AI 설정 - 내 진영 자동 감지 (보드 반전 여부로 판단)
+                Dim side As String
+                If _boardRecognizer.IsBoardFlipped Then
+                    side = HAN
+                Else
                     side = CHO
                 End If
                 Dim sideText = If(side = CHO, "초", "한")
@@ -1179,6 +1435,13 @@ Namespace MacroAutoControl
                                     ElseIf HAN_PIECES.Contains(piece) Then
                                         Using pen As New Pen(Color.FromArgb(200, 255, 60, 60), 3)
                                             g.DrawEllipse(pen, px - circleR, py - circleR, circleR * 2, circleR * 2)
+                                        End Using
+                                    End If
+
+                                    ' 내 궁에 남색 사각형 표시
+                                    If isMine AndAlso (piece = CK OrElse piece = HK) Then
+                                        Using pen As New Pen(Color.FromArgb(255, 0, 0, 128), 3)
+                                            g.DrawRectangle(pen, px - circleR, py - circleR, circleR * 2, circleR * 2)
                                         End Using
                                     End If
 
@@ -1365,6 +1628,16 @@ Namespace MacroAutoControl
                 nudDelay.Value = Math.Max(nudDelay.Minimum, Math.Min(nudDelay.Maximum, item.DelayAfterClick))
                 _updatingFromSelection = False
 
+                ' 마스크 모드 상태 반영
+                _maskMode = (item.Mask IsNot Nothing)
+                If _maskMode Then
+                    btnMaskToggle.Text = "Mask ON"
+                    btnMaskToggle.BackColor = Color.FromArgb(255, 180, 180)
+                Else
+                    btnMaskToggle.Text = "Mask OFF"
+                    btnMaskToggle.BackColor = Color.FromArgb(220, 220, 220)
+                End If
+
                 Try
                     If item.IsAI Then
                         picTemplate.Image = Nothing
@@ -1403,30 +1676,72 @@ Namespace MacroAutoControl
             If _targetWindow IsNot Nothing Then Return True
 
             Dim windows = WindowFinder.GetAllVisibleWindows()
+
+            ' 저장된 창 이름으로 우선 검색 (정확 일치 → 부분 일치)
+            If Not String.IsNullOrEmpty(_savedWindowTitle) Then
+                Dim matched = windows.FirstOrDefault(Function(w) w.Title = _savedWindowTitle)
+                If matched Is Nothing Then
+                    matched = windows.FirstOrDefault(Function(w) w.Title.Contains(_savedWindowTitle))
+                End If
+                If matched IsNot Nothing Then
+                    SelectWindow(matched)
+                    UpdateStatus($"창 자동 선택: {matched.Title}")
+                    Application.DoEvents()
+                    Return True
+                End If
+            End If
+
             Dim janggiWindow = windows.FirstOrDefault(Function(w) w.Title.Contains("장기"))
             If janggiWindow IsNot Nothing Then
-                _targetWindow = janggiWindow
-                lblWindowInfo.Text = $"선택: {janggiWindow.Title}"
-                btnMacroRun.Enabled = (_macroItems.Count > 0)
+                SelectWindow(janggiWindow)
                 UpdateStatus($"장기 창 자동 선택: {janggiWindow.Title}")
                 Application.DoEvents()
                 Return True
             End If
 
-            UpdateStatus("장기 창을 찾을 수 없습니다. 대상 창을 선택하세요.")
+            UpdateStatus("대상 창을 찾을 수 없습니다. 창을 선택하세요.")
             Return False
         End Function
+
+        Private Sub lstMacro_MouseDown(sender As Object, e As MouseEventArgs)
+            If e.Button <> MouseButtons.Right Then Return
+            Dim idx = lstMacro.IndexFromPoint(e.Location)
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+
+            lstMacro.SelectedIndex = idx
+            Dim item = _macroItems(idx)
+            Dim newName = InputBox($"항목 이름 변경:", "이름 변경", item.Name)
+            If String.IsNullOrWhiteSpace(newName) OrElse newName = item.Name Then Return
+
+            item.Name = newName.Trim()
+            RefreshMacroList()
+            lstMacro.SelectedIndex = idx
+            UpdateStatus($"항목 이름 변경: {item.Name}")
+        End Sub
 
         Private Sub lstMacro_DoubleClick(sender As Object, e As EventArgs)
             Dim idx = lstMacro.SelectedIndex
             If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            If _macroRunner.IsRunning Then Return
+
+            Dim item = _macroItems(idx)
+
+            ' 항목에 저장된 창 이름으로 우선 선택
+            If Not String.IsNullOrEmpty(item.WindowTitle) AndAlso _targetWindow Is Nothing Then
+                Dim windows = WindowFinder.GetAllVisibleWindows()
+                Dim matched = windows.FirstOrDefault(Function(w) w.Title = item.WindowTitle)
+                If matched Is Nothing Then
+                    matched = windows.FirstOrDefault(Function(w) w.Title.Contains(item.WindowTitle))
+                End If
+                If matched IsNot Nothing Then
+                    SelectWindow(matched)
+                End If
+            End If
 
             If Not AutoSelectJanggiWindow() Then Return
 
-            If _macroRunner.IsRunning Then Return
-
             _isDroppedImage = False
-            Dim singleItem As New List(Of MacroItem) From {_macroItems(idx)}
+            Dim singleItem As New List(Of MacroItem) From {item}
             SetMacroRunningUI(True)
             _macroRunner.RunSequence(singleItem, _targetWindow, Me, chkBackground.Checked, 1)
         End Sub
@@ -1441,6 +1756,38 @@ Namespace MacroAutoControl
         ' =============================================
         ' 매크로 저장/불러오기
         ' =============================================
+        ''' <summary>선택된 항목의 템플릿 이미지를 현재 _templateImage로 갱신</summary>
+        Private Sub UpdateSelectedItemImage()
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            If _templateImage Is Nothing Then Return
+            Dim item = _macroItems(idx)
+            If item.IsAI Then Return  ' AI 항목은 이미지 불필요
+            If item.Threshold <= 0 AndAlso Not String.IsNullOrEmpty(item.SendKeys) Then Return  ' 키전송 전용
+
+            ' 기존 이미지 백업 (항목이름_1.png, _2.png, ...)
+            If item.Image IsNot Nothing AndAlso Not String.IsNullOrEmpty(_currentMacroFile) Then
+                Try
+                    Dim baseName = IO.Path.GetFileNameWithoutExtension(_currentMacroFile)
+                    Dim imgFolder = IO.Path.Combine(IO.Path.GetDirectoryName(_currentMacroFile), baseName)
+                    If IO.Directory.Exists(imgFolder) Then
+                        Dim safeName = MacroRunner.SanitizeFileName(item.Name)
+                        Dim bakNum = 1
+                        While IO.File.Exists(IO.Path.Combine(imgFolder, $"{safeName}_{bakNum}.png"))
+                            bakNum += 1
+                        End While
+                        item.Image.Save(IO.Path.Combine(imgFolder, $"{safeName}_{bakNum}.png"), Imaging.ImageFormat.Png)
+                    End If
+                Catch
+                End Try
+            End If
+
+            item.Image?.Dispose()
+            item.Image = CType(_templateImage.Clone(), Bitmap)
+            RefreshMacroList()
+            lstMacro.SelectedIndex = idx
+        End Sub
+
         ''' <summary>선택된 항목에 nudDelay 값 강제 반영</summary>
         Private Sub CommitDelayToSelected()
             Dim idx = lstMacro.SelectedIndex
@@ -1508,6 +1855,7 @@ Namespace MacroAutoControl
 
                 Dim savedWindowTitle As String = Nothing
                 _macroItems = MacroRunner.LoadFromFile(macroFilePath, savedWindowTitle)
+                _savedWindowTitle = savedWindowTitle
                 RefreshMacroList()
 
                 _currentMacroFile = macroFilePath
@@ -1642,10 +1990,9 @@ Namespace MacroAutoControl
                 End Using
 
                 SetPreviewImage(preview)
-                screenshot.Dispose()
+                ' screenshot는 MacroRunner에서 watch 저장에 사용하므로 여기서 Dispose하지 않음
                 UpdateStatus($"AI: {moveInfo}")
             Catch ex As Exception
-                screenshot?.Dispose()
             End Try
         End Sub
 
@@ -1686,6 +2033,13 @@ Namespace MacroAutoControl
             UpdateStatus($"총 {lstWindows.Items.Count}개 항목을 찾았습니다.")
         End Sub
 
+        Private Sub lstWindows_MouseDown(sender As Object, e As MouseEventArgs)
+            If e.Button = MouseButtons.Right Then
+                RefreshWindowList()
+                UpdateStatus("창 목록 새로고침")
+            End If
+        End Sub
+
         Private Sub lstWindows_DoubleClick(sender As Object, e As EventArgs)
             If lstWindows.SelectedItem Is Nothing Then Return
 
@@ -1715,6 +2069,7 @@ Namespace MacroAutoControl
 
         Private Sub SelectWindow(info As WindowFinder.WindowInfo)
             _targetWindow = info
+            _savedWindowTitle = info.Title
             lblWindowInfo.Text = $"선택: {info.Title}"
             btnMacroRun.Enabled = (_macroItems.Count > 0)
             UpdateStatus($"창 선택: {info.Title} ({info.Bounds.Width}x{info.Bounds.Height})")
@@ -1892,6 +2247,8 @@ Namespace MacroAutoControl
                 _templateImage = bmp
                 picTemplate.Image = _templateImage
                 lblTemplate.Text = $"템플릿: {_templateImage.Width}x{_templateImage.Height} px"
+                ' 선택된 항목이 있으면 템플릿 이미지 갱신
+                UpdateSelectedItemImage()
                 UpdateStatus($"템플릿 로드: {IO.Path.GetFileName(path)}")
             Catch ex As Exception
                 UpdateStatus($"템플릿 로드 실패: {ex.Message}")

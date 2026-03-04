@@ -14,6 +14,10 @@ Namespace MacroAutoControl
         ''' <summary>클릭 위치 오프셋 (템플릿 좌상단 기준, -1이면 중앙)</summary>
         Public Property ClickOffsetX As Integer = -1
         Public Property ClickOffsetY As Integer = -1
+        ''' <summary>마스크 비트맵 (빨간 픽셀=마스킹 영역, 매칭에서 제외)</summary>
+        Public Property Mask As Bitmap
+        ''' <summary>이 항목이 추가될 때 선택된 대상 창 이름</summary>
+        Public Property WindowTitle As String = ""
 
         ' AI 항목 속성
         ''' <summary>AI 항목 여부 (Threshold=-1로 구분)</summary>
@@ -62,17 +66,24 @@ Namespace MacroAutoControl
         End Property
 
         Public Overrides Function ToString() As String
+            Dim winTag = If(String.IsNullOrEmpty(WindowTitle), "", $" [{WindowTitle}]")
             If IsAI Then
-                Return $"{Name} (대기:{DelayAfterClick}ms, 깊이:{AIDepth}, 시간:{AITime:F0}s)"
+                Return $"{Name} (대기:{DelayAfterClick}ms, 깊이:{AIDepth}, 시간:{AITime:F0}s){winTag}"
+            End If
+            ' 키전송 전용 항목 (Threshold=0, SendKeys 있음)
+            If Threshold <= 0 AndAlso Not String.IsNullOrEmpty(SendKeys) Then
+                Return $"{Name} (대기:{DelayAfterClick}ms, {SendKeys}){winTag}"
             End If
             Dim keyInfo = If(String.IsNullOrEmpty(SendKeys), "", $", 키:{SendKeys}")
             Dim clickPos = If(ClickOffsetX >= 0, $", 클릭:{ClickOffsetX},{ClickOffsetY}", "")
-            Return $"{Name} ({ButtonText}, 대기:{DelayAfterClick}ms{clickPos}{keyInfo})"
+            Return $"{Name} ({ButtonText}, 대기:{DelayAfterClick}ms{clickPos}{keyInfo}){winTag}"
         End Function
 
         Public Sub Dispose()
             Image?.Dispose()
             Image = Nothing
+            Mask?.Dispose()
+            Mask = Nothing
         End Sub
     End Class
 End Namespace

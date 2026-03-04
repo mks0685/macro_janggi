@@ -8,6 +8,7 @@ Imports MacroAutoControl.Engine
 Imports MacroAutoControl.AI
 Imports System.Runtime.InteropServices
 Imports MacroAutoControl.Capture
+Imports System.Linq
 
 Namespace MacroAutoControl
     ''' <summary>
@@ -41,6 +42,7 @@ Namespace MacroAutoControl
         Private _watchDir As String = Nothing
         Private _watchDateDir As String = Nothing
         Private _watchCounter As Integer = 0
+        Private _watchPreviousBoard As Board = Nothing
 
         ' 게임 결과 팝업 템플릿
         Private Shared ReadOnly TEMPLATES_DIR As String =
@@ -103,6 +105,23 @@ Namespace MacroAutoControl
         End Function
 
         ''' <summary>
+        ''' 정규화된 보드 하단(row 7~9) 궁 기물로 내 진영 판단.
+        ''' 정규화 후 항상 초=아래이므로, 보드 반전 여부와 화면 하단 궁 위치로 판단.
+        ''' </summary>
+        Private Function DetectMySideByBoard(board As Board) As String
+            If board Is Nothing Then Return Constants.CHO
+            ' 정규화된 보드: row 7~9 = 초 궁성, row 0~2 = 한 궁성
+            ' IsBoardFlipped = True → 화면에서 초궁이 위에 있었음 → 사용자는 한
+            ' IsBoardFlipped = False → 화면에서 초궁이 아래 → 사용자는 초
+            Dim recognizer = GetRecognizer()
+            If recognizer.IsBoardFlipped Then
+                Return Constants.HAN
+            Else
+                Return Constants.CHO
+            End If
+        End Function
+
+        ''' <summary>
         ''' BoardRecognizer.DetectHighlightedPiece를 사용하여 내 차례인지 판정.
         ''' 하이라이트된 기물이 상대 기물이면 → 내 차례 (True)
         ''' 하이라이트된 기물이 내 기물이면 → 상대 차례 (False)
@@ -129,11 +148,11 @@ Namespace MacroAutoControl
             Dim pieceName = If(BoardRecognizer.PIECE_NAMES.ContainsKey(piece), BoardRecognizer.PIECE_NAMES(piece), piece)
 
             If hlSide = mySide Then
-                ' 내 기물이 하이라이트 → 상대 차례 (1초 후 메인 루프에서 재시도)
+                ' 내 기물이 하이라이트 → 상대 차례
                 glowPieceName = $"내빛남:{pieceName} glow={hlGlow}"
                 Return False
             Else
-                ' 상대 기물이 하이라이트 → 상대가 마지막에 둔 수 → 내 차례
+                ' 상대 기물이 하이라이트 → 내 차례
                 glowPieceName = $"상대빛남:{pieceName}({highlighted.Value.Row},{highlighted.Value.Col}) glow={hlGlow}"
                 Return True
             End If
@@ -165,6 +184,7 @@ Namespace MacroAutoControl
                                        currentRepeat As Integer, totalRepeat As Integer) As Board
             Dim recognizer = GetRecognizer()
             Dim pollCount = 0
+            Dim mySide As String = Nothing  ' 첫 감지 후 고정
 
             While Not _cancelRequested
                 pollCount += 1
@@ -224,14 +244,11 @@ Namespace MacroAutoControl
                     Continue While
                 End If
 
-                ' 진영 자동 감지
-                Dim mySide = item.AISide
-                If mySide = "AUTO" Then
-                    Dim detectedSide = recognizer.DetectMySideByBottomKingColor(mat)
-                    If detectedSide IsNot Nothing Then
-                        mySide = detectedSide
-                    Else
-                        mySide = Constants.CHO
+                ' 진영 자동 감지 (첫 감지 후 고정) - 정규화된 보드 하단 궁 기물로 판단
+                If mySide Is Nothing Then
+                    mySide = item.AISide
+                    If mySide = "AUTO" Then
+                        mySide = DetectMySideByBoard(board)
                     End If
                 End If
                 Dim dbgSide = If(mySide = Constants.CHO, "초", "한")
@@ -347,6 +364,13 @@ Namespace MacroAutoControl
                                             End Using
                                         End If
 
+                                        ' 내 궁에 남색 사각형 표시
+                                        If isMine AndAlso (piece = Constants.CK OrElse piece = Constants.HK) Then
+                                            Using pen As New Pen(Color.FromArgb(255, 0, 0, 128), 3)
+                                                g.DrawRectangle(pen, px - circleR, py - circleR, circleR * 2, circleR * 2)
+                                            End Using
+                                        End If
+
                                         ' 기물 이름 + glow 값
                                         Dim shortName = If(pName.Length >= 2, pName.Substring(1), pName)
                                         Dim glowVal = 0
@@ -405,47 +429,34 @@ Namespace MacroAutoControl
                     End Try
                 End If
 
-                ' 빛남 감지 (강제 내차례 플래그 우선)
+                ' 빛남 감지
                 Dim gridPos = recognizer.GetGridPositions()
                 Dim cellSize = recognizer.GetCellSize()
                 Dim glowPiece As String = Nothing
                 Dim isMyTurn = False
-                If _forceMyTurn Then
-                    isMyTurn = True
-                    glowPiece = "강제지정"
-                    _forceMyTurn = False
-                ElseIf gridPos IsNot Nothing Then
+                If gridPos IsNot Nothing Then
                     isMyTurn = HasGlowAroundMyPieces(mat, board, gridPos, mySide, cellSize.Item1, cellSize.Item2, recognizer.IsBoardFlipped, targetWindow, glowPiece)
                 End If
+                ' 강제 내차례: 상대 기물 확인된 경우만 허용, 빛남 없으면 강제 진행
+                If _forceMyTurn Then
+                    If Not isMyTurn AndAlso glowPiece IsNot Nothing AndAlso glowPiece.StartsWith("내빛남") Then
+                        ' 내 기물이 빛나면 강제 지정 무시
+                        glowPiece = $"강제지정 거부 ({glowPiece})"
+                    Else
+                        isMyTurn = True
+                        glowPiece = If(glowPiece, "강제지정")
+                    End If
+                    _forceMyTurn = False
+                End If
+
+                ' 기물 위치 변동 시 스크린샷 저장 (내 차례/상대 차례 무관)
+                SaveWatchIfChanged(screenshot, board)
 
                 If Not isMyTurn Then
                     mat.Dispose()
                     screenshot.Dispose()
                     Continue While
                 End If
-
-                ' 내 차례 감지! 스크린샷 저장 (첫 저장 시 번호 폴더 생성)
-            If _watchDateDir IsNot Nothing Then
-                Try
-                    If _watchDir Is Nothing Then
-                        Dim maxNum = 0
-                        For Each d In IO.Directory.GetDirectories(_watchDateDir)
-                            Dim dn = IO.Path.GetFileName(d)
-                            Dim num As Integer
-                            If Integer.TryParse(dn, num) Then
-                                If num > maxNum Then maxNum = num
-                            End If
-                        Next
-                        _watchDir = IO.Path.Combine(_watchDateDir, (maxNum + 1).ToString("D3"))
-                        IO.Directory.CreateDirectory(_watchDir)
-                        Console.WriteLine($"[알림] 스크린샷 저장 폴더: {_watchDir}")
-                    End If
-                    _watchCounter += 1
-                    Dim savePath = IO.Path.Combine(_watchDir, $"{_watchCounter.ToString("D4")}.jpg")
-                    screenshot.Save(savePath, System.Drawing.Imaging.ImageFormat.Jpeg)
-                Catch
-                End Try
-            End If
 
             ' 상대 수 애니메이션 완료 대기 후 재캡처
             mat.Dispose()
@@ -503,6 +514,39 @@ Namespace MacroAutoControl
                 End If
             Next
 
+            ' 최종 확인: 하이라이트된 기물이 여전히 상대 기물인지 검증
+            Dim verifyBoard = If(finalBoard, board)
+            Dim stillMyTurn2 = True
+            Dim verifySs = WindowFinder.CaptureWindow(targetWindow.Handle)
+            If verifySs IsNot Nothing Then
+                Dim verifyMat As Mat = Nothing
+                Try
+                    verifyMat = BitmapConverter.ToMat(verifySs)
+                    If verifyMat.Channels() = 4 Then
+                        Dim bgr3 As New Mat()
+                        Cv2.CvtColor(verifyMat, bgr3, ColorConversionCodes.BGRA2BGR)
+                        verifyMat.Dispose()
+                        verifyMat = bgr3
+                    End If
+                    Dim vGridPos = recognizer.GetGridPositions()
+                    Dim vCellSize = recognizer.GetCellSize()
+                    If vGridPos IsNot Nothing Then
+                        Dim vGlowPiece As String = Nothing
+                        stillMyTurn2 = HasGlowAroundMyPieces(verifyMat, verifyBoard, vGridPos, mySide, vCellSize.Item1, vCellSize.Item2, recognizer.IsBoardFlipped, targetWindow, vGlowPiece)
+                        If Not stillMyTurn2 Then
+                            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 내 차례 재확인 실패 ({vGlowPiece}) → 재대기...", currentRepeat, totalRepeat)
+                            Application.DoEvents()
+                        End If
+                    End If
+                Catch
+                Finally
+                    verifyMat?.Dispose()
+                    verifySs.Dispose()
+                End Try
+            End If
+
+            If Not stillMyTurn2 Then Continue While
+
             If finalBoard IsNot Nothing Then
                 Return finalBoard
             Else
@@ -522,6 +566,10 @@ Namespace MacroAutoControl
                                useBackground As Boolean,
                                Optional repeatCount As Integer = 1,
                                Optional initialStartIndex As Integer = 0)
+            If _isRunning Then
+                Return
+            End If
+
             If items.Count = 0 Then
                 RaiseEvent MacroCompleted(False, "매크로 항목이 없습니다.")
                 Return
@@ -540,10 +588,13 @@ Namespace MacroAutoControl
             ' 내 차례 스크린샷 저장 폴더 초기화
             _watchCounter = 0
             _watchDir = Nothing
+            _watchPreviousBoard = Nothing
             Dim baseDir = "D:\images\macro_janggi"
             Dim dateStr = DateTime.Now.ToString("yyyy-MM-dd")
             _watchDateDir = IO.Path.Combine(baseDir, $"watch_{dateStr}")
             IO.Directory.CreateDirectory(_watchDateDir)
+
+            Dim defaultWindow = targetWindow
 
             Dim infinite = (repeatCount = 0)
             Dim totalRepeat = If(infinite, 0, repeatCount)
@@ -568,6 +619,20 @@ Namespace MacroAutoControl
 
                         Dim item = items(i)
 
+                        ' 항목별 대상 창 해결 (없으면 첫줄 윈도우 사용)
+                        If Not String.IsNullOrEmpty(item.WindowTitle) Then
+                            Dim windows = WindowFinder.GetAllVisibleWindows()
+                            Dim matched = windows.FirstOrDefault(Function(w) w.Title = item.WindowTitle)
+                            If matched Is Nothing Then
+                                matched = windows.FirstOrDefault(Function(w) w.Title.Contains(item.WindowTitle))
+                            End If
+                            If matched IsNot Nothing Then
+                                targetWindow = matched
+                            End If
+                        Else
+                            targetWindow = defaultWindow
+                        End If
+
                         If item.IsAI Then
                             ' AI 항목 실행
                             Dim gameEnded = ExecuteAIItem(item, i, items.Count, targetWindow, ownerForm, useBackground, currentRepeat, totalRepeat)
@@ -582,6 +647,7 @@ Namespace MacroAutoControl
                                 _gameEndReason = Nothing
                                 _recognizer?.ResetGrid()
                                 _gameHashHistory.Clear()
+                    _watchPreviousBoard = Nothing
                                 RaiseEvent ProgressChanged(0, items.Count, "", $"게임 종료 → 재시작 대기 (3초)...", currentRepeat, totalRepeat)
                                 Application.DoEvents()
                                 Dim w = 0
@@ -597,47 +663,127 @@ Namespace MacroAutoControl
                                 Return
                             End If
                         ElseIf item.Threshold > 0 Then
-                            ' 이미지 찾기+클릭 항목 (실패 시 다음 항목으로)
-                            RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "찾는 중...", currentRepeat, totalRepeat)
-                            Application.DoEvents()
-
-                            Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
-
-                            If screenshot IsNot Nothing AndAlso Not _cancelRequested Then
-                                Dim result = ButtonFinder.FindByTemplate(screenshot, item.Image, item.Threshold)
-                                screenshot.Dispose()
-
-                                If result.Found Then
-                                    RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "클릭 중...", currentRepeat, totalRepeat)
+                            ' 이미지 찾기+클릭 항목
+                            If item.DelayAfterClick > 0 Then
+                                ' 폴링 모드: DelayAfterClick 시간 내에 0.5초 간격으로 반복 탐색
+                                Dim elapsed = 0
+                                Dim imageFound = False
+                                While elapsed < item.DelayAfterClick AndAlso Not _cancelRequested
+                                    Dim remaining = item.DelayAfterClick - elapsed
+                                    RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, $"찾는 중... ({remaining}ms 남음)", currentRepeat, totalRepeat)
                                     Application.DoEvents()
 
-                                    Dim clickX As Integer
-                                    Dim clickY As Integer
-                                    If item.ClickOffsetX >= 0 Then
-                                        clickX = result.MatchRect.X + item.ClickOffsetX
-                                        clickY = result.MatchRect.Y + item.ClickOffsetY
+                                    Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
+                                    If screenshot IsNot Nothing Then
+                                        Dim result = ButtonFinder.FindByTemplate(screenshot, item.Image, item.Threshold, item.Mask)
+                                        screenshot.Dispose()
+
+                                        If result.Found Then
+                                            RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "클릭 중...", currentRepeat, totalRepeat)
+                                            Application.DoEvents()
+
+                                            Dim clickX As Integer
+                                            Dim clickY As Integer
+                                            If item.ClickOffsetX >= 0 Then
+                                                clickX = result.MatchRect.X + item.ClickOffsetX
+                                                clickY = result.MatchRect.Y + item.ClickOffsetY
+                                            Else
+                                                clickX = result.Location.X
+                                                clickY = result.Location.Y
+                                            End If
+
+                                            ButtonClicker.ClickInWindow(
+                                                targetWindow.Handle,
+                                                clickX,
+                                                clickY,
+                                                useBackground,
+                                                item.Button)
+
+                                            ' 클릭 후 1초 대기
+                                            RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "클릭 완료 → 1초 대기...", currentRepeat, totalRepeat)
+                                            Application.DoEvents()
+                                            Dim cw1 = 0
+                                            While cw1 < 1000 AndAlso Not _cancelRequested
+                                                Thread.Sleep(100)
+                                                cw1 += 100
+                                                Application.DoEvents()
+                                            End While
+
+                                            imageFound = True
+                                            Exit While
+                                        End If
                                     Else
-                                        clickX = result.Location.X
-                                        clickY = result.Location.Y
+                                        screenshot?.Dispose()
                                     End If
 
-                                    ButtonClicker.ClickInWindow(
-                                        targetWindow.Handle,
-                                        clickX,
-                                        clickY,
-                                        useBackground,
-                                        item.Button)
-                                Else
-                                    RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, $"못 찾음 ({result.Confidence:P0}) → 다음", currentRepeat, totalRepeat)
+                                    ' 0.5초 대기 후 재시도
+                                    Dim pollWait = Math.Min(500, item.DelayAfterClick - elapsed)
+                                    Dim pw = 0
+                                    While pw < pollWait AndAlso Not _cancelRequested
+                                        Dim chunk = Math.Min(100, pollWait - pw)
+                                        Thread.Sleep(chunk)
+                                        pw += chunk
+                                        Application.DoEvents()
+                                    End While
+                                    elapsed += pollWait
+                                End While
+
+                                If Not imageFound AndAlso Not _cancelRequested Then
+                                    RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "시간 초과 → 다음", currentRepeat, totalRepeat)
                                     Application.DoEvents()
                                 End If
                             Else
-                                screenshot?.Dispose()
+                                ' 원샷 모드: DelayAfterClick = 0이면 기존 1회 탐색
+                                RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "찾는 중...", currentRepeat, totalRepeat)
+                                Application.DoEvents()
+
+                                Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
+                                If screenshot IsNot Nothing AndAlso Not _cancelRequested Then
+                                    Dim result = ButtonFinder.FindByTemplate(screenshot, item.Image, item.Threshold, item.Mask)
+                                    screenshot.Dispose()
+
+                                    If result.Found Then
+                                        RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "클릭 중...", currentRepeat, totalRepeat)
+                                        Application.DoEvents()
+
+                                        Dim clickX As Integer
+                                        Dim clickY As Integer
+                                        If item.ClickOffsetX >= 0 Then
+                                            clickX = result.MatchRect.X + item.ClickOffsetX
+                                            clickY = result.MatchRect.Y + item.ClickOffsetY
+                                        Else
+                                            clickX = result.Location.X
+                                            clickY = result.Location.Y
+                                        End If
+
+                                        ButtonClicker.ClickInWindow(
+                                            targetWindow.Handle,
+                                            clickX,
+                                            clickY,
+                                            useBackground,
+                                            item.Button)
+
+                                        ' 클릭 후 1초 대기
+                                        RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, "클릭 완료 → 1초 대기...", currentRepeat, totalRepeat)
+                                        Application.DoEvents()
+                                        Dim cw2 = 0
+                                        While cw2 < 1000 AndAlso Not _cancelRequested
+                                            Thread.Sleep(100)
+                                            cw2 += 100
+                                            Application.DoEvents()
+                                        End While
+                                    Else
+                                        RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, $"못 찾음 ({result.Confidence:P0}) → 다음", currentRepeat, totalRepeat)
+                                        Application.DoEvents()
+                                    End If
+                                Else
+                                    screenshot?.Dispose()
+                                End If
                             End If
                         End If
 
-                        ' 대기 (AI 항목은 ExecuteAIItem 내부에서 처리)
-                        If item.DelayAfterClick > 0 AndAlso Not item.IsAI Then
+                        ' 대기 (AI 항목은 ExecuteAIItem 내부에서 처리, 이미지 항목은 폴링에서 처리)
+                        If item.DelayAfterClick > 0 AndAlso Not item.IsAI AndAlso item.Threshold <= 0 Then
                             RaiseEvent ProgressChanged(i + 1, items.Count, item.Name, $"대기 중 ({item.DelayAfterClick}ms)...", currentRepeat, totalRepeat)
                             Application.DoEvents()
 
@@ -662,7 +808,15 @@ Namespace MacroAutoControl
 
                     ' 다음 반복 준비
                     If (infinite OrElse currentRepeat < totalRepeat) AndAlso Not _cancelRequested Then
-                        startIndex = firstAIIndex  ' 다음 반복은 AI부터
+                        RaiseEvent ProgressChanged(0, items.Count, "", $"반복 대기 (1초)...", currentRepeat, totalRepeat)
+                        Application.DoEvents()
+                        Dim rw = 0
+                        While rw < 1000 AndAlso Not _cancelRequested
+                            Thread.Sleep(100)
+                            rw += 100
+                            Application.DoEvents()
+                        End While
+                        startIndex = 0  ' 처음부터
                     End If
                 End While
 
@@ -689,6 +843,7 @@ Namespace MacroAutoControl
 
             _currentAIItem = item
             Dim recognizer = GetRecognizer()
+            Dim aiSide As String = Nothing  ' 첫 감지 후 고정
 
             While Not _cancelRequested
             Dim board As Board = Nothing
@@ -702,6 +857,7 @@ Namespace MacroAutoControl
                     _gameEndReason = Nothing
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
                 Return False
@@ -740,6 +896,7 @@ Namespace MacroAutoControl
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {gameResult} → 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
 
@@ -772,23 +929,16 @@ Namespace MacroAutoControl
                 Return False
             End If
 
-            ' 2. 진영 자동 감지
-            ' 보드가 뒤집혔으면 원래 화면에서 한(HAN)이 아래에 있었으므로 내 진영 = 한
-            Dim aiSide = item.AISide
-            If aiSide = "AUTO" Then
-                If recognizer.IsBoardFlipped Then
-                    aiSide = Constants.HAN
-                Else
-                    For r = 7 To 9
-                        For c = 3 To 5
-                            Dim piece = board.Grid(r)(c)
-                            If piece = Constants.CK Then aiSide = Constants.CHO : Exit For
-                            If piece = Constants.HK Then aiSide = Constants.HAN : Exit For
-                        Next
-                        If aiSide <> "AUTO" Then Exit For
-                    Next
+            ' 2. 진영 자동 감지 (첫 감지 후 고정)
+            If aiSide Is Nothing Then
+                aiSide = item.AISide
+                If aiSide = "AUTO" Then
+                    aiSide = DetectMySideByBoard(board)
                 End If
-                If aiSide = "AUTO" Then aiSide = Constants.CHO
+                Dim detSideText = If(aiSide = Constants.CHO, "초", "한")
+                Console.WriteLine($"[진영감지] AI 진영: {detSideText} (flipped={recognizer.IsBoardFlipped})")
+                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 진영={detSideText} 감지 완료", currentRepeat, totalRepeat)
+                Application.DoEvents()
             End If
 
             ' 3. AI 최적수 계산
@@ -838,6 +988,7 @@ Namespace MacroAutoControl
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 다음", currentRepeat, totalRepeat)
                     _recognizer?.ResetGrid()
                     _gameHashHistory.Clear()
+                    _watchPreviousBoard = Nothing
                     Return False  ' 다음 매크로 항목으로
                 End If
             End If
@@ -866,6 +1017,65 @@ Namespace MacroAutoControl
 
             If _cancelRequested Then
                 Return False
+            End If
+
+            ' 5.5. 클릭 전 상대 기물 하이라이트 재확인
+            Dim preClickSs = WindowFinder.CaptureWindow(targetWindow.Handle)
+            If preClickSs IsNot Nothing Then
+                Dim preClickMat As Mat = Nothing
+                Try
+                    preClickMat = BitmapConverter.ToMat(preClickSs)
+                    If preClickMat.Channels() = 4 Then
+                        Dim bgr4 As New Mat()
+                        Cv2.CvtColor(preClickMat, bgr4, ColorConversionCodes.BGRA2BGR)
+                        preClickMat.Dispose()
+                        preClickMat = bgr4
+                    End If
+                    Dim preBoard = recognizer.GetBoardState(preClickMat)
+                    If preBoard IsNot Nothing Then
+                        ' 보드 상태 변경 감지 (상대가 AI 계산 중 이동)
+                        Dim boardChanged = False
+                        For br = 0 To Constants.BOARD_ROWS - 1
+                            For bc = 0 To Constants.BOARD_COLS - 1
+                                If preBoard.Grid(br)(bc) <> board.Grid(br)(bc) Then
+                                    boardChanged = True
+                                    Exit For
+                                End If
+                            Next
+                            If boardChanged Then Exit For
+                        Next
+                        If boardChanged Then
+                            preClickMat.Dispose()
+                            preClickSs.Dispose()
+                            capturedBmp?.Dispose()
+                            _gameHashHistory.RemoveAt(_gameHashHistory.Count - 1)
+                            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 보드 변경 감지 → 재계산...", currentRepeat, totalRepeat)
+                            Application.DoEvents()
+                            Continue While
+                        End If
+
+                        ' 하이라이트 재확인
+                        Dim pcGridPos = recognizer.GetGridPositions()
+                        Dim pcCellSize = recognizer.GetCellSize()
+                        If pcGridPos IsNot Nothing Then
+                            Dim pcGlow As String = Nothing
+                            Dim pcMyTurn = HasGlowAroundMyPieces(preClickMat, preBoard, pcGridPos, aiSide, pcCellSize.Item1, pcCellSize.Item2, recognizer.IsBoardFlipped, targetWindow, pcGlow)
+                            If Not pcMyTurn Then
+                                preClickMat.Dispose()
+                                preClickSs.Dispose()
+                                capturedBmp?.Dispose()
+                                _gameHashHistory.RemoveAt(_gameHashHistory.Count - 1)
+                                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 클릭 전 재확인 실패 ({pcGlow}) → 재대기...", currentRepeat, totalRepeat)
+                                Application.DoEvents()
+                                Continue While
+                            End If
+                        End If
+                    End If
+                Catch
+                Finally
+                    preClickMat?.Dispose()
+                    preClickSs.Dispose()
+                End Try
             End If
 
             ' 6. 시각화 이벤트 발생
@@ -903,9 +1113,11 @@ Namespace MacroAutoControl
             RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 차례 대기...", currentRepeat, totalRepeat)
             Application.DoEvents()
 
-            ' AI 수 실행 후 대기 (2초) → 재캡처 진행
+            capturedBmp?.Dispose()
+
+            ' AI 수 실행 후 대기 (1초) → 재캡처 진행
             Dim dw = 0
-            While dw < 2000 AndAlso Not _cancelRequested
+            While dw < 1000 AndAlso Not _cancelRequested
                 Thread.Sleep(100)
                 dw += 100
                 Application.DoEvents()
@@ -923,10 +1135,7 @@ Namespace MacroAutoControl
             Dim baseName = IO.Path.GetFileNameWithoutExtension(macroFilePath)
             Dim imgFolder = IO.Path.Combine(dir, baseName)
 
-            ' 기존 이미지 폴더 정리 후 재생성
-            If IO.Directory.Exists(imgFolder) Then
-                IO.Directory.Delete(imgFolder, True)
-            End If
+            ' 이미지 폴더 생성 (기존 폴더는 유지)
             IO.Directory.CreateDirectory(imgFolder)
 
             Dim lines As New List(Of String)
@@ -938,12 +1147,17 @@ Namespace MacroAutoControl
                 Dim item = items(i)
                 If item.IsAI Then
                     ' AI 항목: AI|이름|대기|임계값|버튼|키|AI진영|AI깊이|AI시간
-                    lines.Add($"AI|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|0||{item.AISide}|{item.AIDepth}|{item.AITime:F1}")
+                    lines.Add($"AI|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|0||{item.AISide}|{item.AIDepth}|{item.AITime:F1}|{item.WindowTitle}")
                 Else
-                    Dim imgFileName = $"{(i + 1):D2}_{SanitizeFileName(item.Name)}.png"
-                    lines.Add($"{imgFileName}|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|{CInt(item.Button)}|{item.SendKeys}|{item.ClickOffsetX}|{item.ClickOffsetY}")
+                    Dim imgFileName = $"{SanitizeFileName(item.Name)}.png"
+                    lines.Add($"{imgFileName}|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|{CInt(item.Button)}|{item.SendKeys}|{item.ClickOffsetX}|{item.ClickOffsetY}|{item.WindowTitle}")
                     ' 이미지를 폴더에 저장
                     item.Image.Save(IO.Path.Combine(imgFolder, imgFileName), Imaging.ImageFormat.Png)
+                    ' 마스크 저장
+                    If item.Mask IsNot Nothing Then
+                        Dim maskFileName = $"{SanitizeFileName(item.Name)}_mask.png"
+                        item.Mask.Save(IO.Path.Combine(imgFolder, maskFileName), Imaging.ImageFormat.Png)
+                    End If
                 End If
             Next
 
@@ -995,17 +1209,40 @@ Namespace MacroAutoControl
                     If parts.Length >= 9 Then
                         Double.TryParse(parts(8).Trim(), aiItem.AITime)
                     End If
+                    If parts.Length >= 10 Then
+                        aiItem.WindowTitle = parts(9).Trim()
+                    End If
                     items.Add(aiItem)
                     Continue For
                 End If
 
                 ' 일반 항목
-                Dim imgPath = IO.Path.Combine(imgFolder, parts(0).Trim())
-                If Not IO.File.Exists(imgPath) Then Continue For
-
                 Dim item As New MacroItem()
                 item.Name = parts(1).Trim()
-                item.Image = New Bitmap(imgPath)
+
+                ' 이미지 로드: 이름 기반 파일명 우선, 없으면 저장된 파일명(구형식 호환)
+                Dim imgPath = IO.Path.Combine(imgFolder, $"{SanitizeFileName(item.Name)}.png")
+                If Not IO.File.Exists(imgPath) Then
+                    imgPath = IO.Path.Combine(imgFolder, parts(0).Trim())
+                End If
+
+                ' 파일 잠금 방지: 메모리로 복사 후 파일 해제
+                If IO.File.Exists(imgPath) Then
+                    Using tmp As New Bitmap(imgPath)
+                        item.Image = New Bitmap(tmp)
+                    End Using
+                Else
+                    ' 이미지 파일 없으면 더미 이미지로 대체 (항목 유지)
+                    item.Image = New Bitmap(1, 1)
+                End If
+                ' 마스크 로드
+                Dim maskPath = IO.Path.Combine(imgFolder, $"{SanitizeFileName(item.Name)}_mask.png")
+                If IO.File.Exists(maskPath) Then
+                    Using tmpMask As New Bitmap(maskPath)
+                        item.Mask = New Bitmap(tmpMask)
+                    End Using
+                End If
+
                 Integer.TryParse(parts(2).Trim(), item.DelayAfterClick)
                 Double.TryParse(parts(3).Trim(), item.Threshold)
                 If parts.Length >= 5 Then
@@ -1021,7 +1258,9 @@ Namespace MacroAutoControl
                     Integer.TryParse(parts(6).Trim(), item.ClickOffsetX)
                     Integer.TryParse(parts(7).Trim(), item.ClickOffsetY)
                 End If
-
+                If parts.Length >= 9 Then
+                    item.WindowTitle = parts(8).Trim()
+                End If
                 items.Add(item)
             Next
 
@@ -1095,7 +1334,52 @@ Namespace MacroAutoControl
             End Select
         End Function
 
-        Private Shared Function SanitizeFileName(name As String) As String
+        ''' <summary>
+        ''' 기물 위치 변동 시 스크린샷 저장. 이전 보드와 비교하여 변동이 있을 때만 저장.
+        ''' </summary>
+        Private Sub SaveWatchIfChanged(screenshot As Bitmap, board As Board)
+            If _watchDateDir Is Nothing Then Return
+            If board Is Nothing Then Return
+
+            ' 이전 보드와 비교: 변동 없으면 저장하지 않음
+            If _watchPreviousBoard IsNot Nothing Then
+                Dim changed = False
+                For r = 0 To Constants.BOARD_ROWS - 1
+                    For c = 0 To Constants.BOARD_COLS - 1
+                        If board.Grid(r)(c) <> _watchPreviousBoard.Grid(r)(c) Then
+                            changed = True
+                            Exit For
+                        End If
+                    Next
+                    If changed Then Exit For
+                Next
+                If Not changed Then Return
+            End If
+
+            Try
+                If _watchDir Is Nothing Then
+                    Dim maxNum = 0
+                    For Each d In IO.Directory.GetDirectories(_watchDateDir)
+                        Dim dn = IO.Path.GetFileName(d)
+                        Dim num As Integer
+                        If Integer.TryParse(dn, num) Then
+                            If num > maxNum Then maxNum = num
+                        End If
+                    Next
+                    _watchDir = IO.Path.Combine(_watchDateDir, (maxNum + 1).ToString("D3"))
+                    IO.Directory.CreateDirectory(_watchDir)
+                    Console.WriteLine($"[알림] 스크린샷 저장 폴더: {_watchDir}")
+                End If
+                _watchCounter += 1
+                Dim savePath = IO.Path.Combine(_watchDir, $"{_watchCounter.ToString("D4")}.jpg")
+                screenshot.Save(savePath, System.Drawing.Imaging.ImageFormat.Jpeg)
+            Catch
+            End Try
+
+            _watchPreviousBoard = board
+        End Sub
+
+        Friend Shared Function SanitizeFileName(name As String) As String
             Dim invalid = IO.Path.GetInvalidFileNameChars()
             Dim result = name
             For Each c In invalid

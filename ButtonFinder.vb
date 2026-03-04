@@ -123,6 +123,115 @@ Namespace MacroAutoControl
         End Function
 
         ''' <summary>
+        ''' 템플릿 이미지를 사용하여 버튼 위치 찾기 (마스크 지원 버전)
+        ''' 마스크의 빨간(R>200) 픽셀은 비교에서 제외
+        ''' </summary>
+        Public Shared Function FindByTemplate(screenshot As Bitmap, template As Bitmap, threshold As Double, mask As Bitmap) As MatchResult
+            If mask Is Nothing Then Return FindByTemplate(screenshot, template, threshold)
+
+            Dim bestMatch As New MatchResult() With {.Found = False, .Confidence = 0}
+
+            Dim srcWidth = screenshot.Width
+            Dim srcHeight = screenshot.Height
+            Dim tplWidth = template.Width
+            Dim tplHeight = template.Height
+
+            If tplWidth > srcWidth OrElse tplHeight > srcHeight Then
+                Return bestMatch
+            End If
+
+            ' BitmapData로 빠른 픽셀 접근
+            Dim srcData = screenshot.LockBits(
+                New Rectangle(0, 0, srcWidth, srcHeight),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb)
+            Dim tplData = template.LockBits(
+                New Rectangle(0, 0, tplWidth, tplHeight),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb)
+
+            ' 마스크 크기를 템플릿에 맞춰 처리
+            Dim maskBmp = mask
+            If mask.Width <> tplWidth OrElse mask.Height <> tplHeight Then
+                maskBmp = New Bitmap(mask, tplWidth, tplHeight)
+            End If
+            Dim maskData = maskBmp.LockBits(
+                New Rectangle(0, 0, tplWidth, tplHeight),
+                ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb)
+
+            Try
+                Dim srcStride = srcData.Stride
+                Dim tplStride = tplData.Stride
+                Dim maskStride = maskData.Stride
+                Dim srcBytes(srcStride * srcHeight - 1) As Byte
+                Dim tplBytes(tplStride * tplHeight - 1) As Byte
+                Dim maskBytes(maskStride * tplHeight - 1) As Byte
+
+                Runtime.InteropServices.Marshal.Copy(srcData.Scan0, srcBytes, 0, srcBytes.Length)
+                Runtime.InteropServices.Marshal.Copy(tplData.Scan0, tplBytes, 0, tplBytes.Length)
+                Runtime.InteropServices.Marshal.Copy(maskData.Scan0, maskBytes, 0, maskBytes.Length)
+
+                Dim totalPixels = tplWidth * tplHeight
+                Dim stepSize = Math.Max(1, CInt(Math.Sqrt(totalPixels / 500)))
+
+                Dim bestScore As Double = 0
+                Dim scanStep = 2
+
+                For y = 0 To srcHeight - tplHeight - 1 Step scanStep
+                    For x = 0 To srcWidth - tplWidth - 1 Step scanStep
+                        Dim matchCount = 0
+                        Dim sampleCount = 0
+                        Dim earlyExit = False
+
+                        For ty = 0 To tplHeight - 1 Step stepSize
+                            For tx = 0 To tplWidth - 1 Step stepSize
+                                ' 마스크 확인: R채널 > 200이면 스킵
+                                Dim maskIdx = ty * maskStride + tx * 4
+                                If maskBytes(maskIdx + 2) > 200 Then Continue For
+
+                                sampleCount += 1
+
+                                Dim srcIdx = (y + ty) * srcStride + (x + tx) * 4
+                                Dim tplIdx = ty * tplStride + tx * 4
+
+                                Dim db = Math.Abs(CInt(srcBytes(srcIdx)) - CInt(tplBytes(tplIdx)))
+                                Dim dg = Math.Abs(CInt(srcBytes(srcIdx + 1)) - CInt(tplBytes(tplIdx + 1)))
+                                Dim dr = Math.Abs(CInt(srcBytes(srcIdx + 2)) - CInt(tplBytes(tplIdx + 2)))
+
+                                If db <= 30 AndAlso dg <= 30 AndAlso dr <= 30 Then
+                                    matchCount += 1
+                                End If
+                            Next
+                            If sampleCount > 20 AndAlso (matchCount / CDbl(sampleCount)) < threshold * 0.7 Then
+                                earlyExit = True
+                                Exit For
+                            End If
+                        Next
+
+                        If earlyExit Then Continue For
+                        If sampleCount = 0 Then Continue For
+
+                        Dim score = matchCount / CDbl(sampleCount)
+                        If score > bestScore Then
+                            bestScore = score
+                            bestMatch.Location = New Point(x + tplWidth \ 2, y + tplHeight \ 2)
+                            bestMatch.MatchRect = New Rectangle(x, y, tplWidth, tplHeight)
+                            bestMatch.Confidence = score
+                        End If
+                    Next
+                Next
+
+                bestMatch.Found = bestScore >= threshold
+
+            Finally
+                screenshot.UnlockBits(srcData)
+                template.UnlockBits(tplData)
+                maskBmp.UnlockBits(maskData)
+                If maskBmp IsNot mask Then maskBmp.Dispose()
+            End Try
+
+            Return bestMatch
+        End Function
+
+        ''' <summary>
         ''' 색상 범위로 버튼 영역 찾기 (대국신청 버튼의 특징적인 색상 사용)
         ''' </summary>
         Public Shared Function FindByColor(screenshot As Bitmap,
