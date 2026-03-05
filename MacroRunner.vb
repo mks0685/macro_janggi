@@ -47,9 +47,6 @@ Namespace MacroAutoControl
         Private _watchCounter As Integer = 0
         Private _watchPreviousBoard As Board = Nothing
 
-        ' 게임 결과 팝업 위치 (클릭용)
-        Private _lastPopupLocation As Drawing.Point? = Nothing
-
         ' 게임 결과 팝업 템플릿
         Private Shared ReadOnly TEMPLATES_DIR As String =
             IO.Path.Combine(IO.Path.GetDirectoryName(
@@ -174,28 +171,49 @@ Namespace MacroAutoControl
 
                 Dim result = ButtonFinder.FindByTemplate(screenshot, templatePath, 0.75)
                 If result.Found Then
-                    _lastPopupLocation = result.Location
                     Return tpl(1)
                 End If
             Next
-            _lastPopupLocation = Nothing
             Return Nothing
         End Function
 
         ''' <summary>
-        ''' 게임 결과 팝업 클릭하여 닫기
+        ''' 매크로 목록의 패턴매칭 항목을 스크린샷에 대해 검사.
+        ''' 매칭되면 클릭 후 항목 이름 반환, 없으면 Nothing.
         ''' </summary>
-        Private Sub ClickGameResultPopup(targetWindow As WindowFinder.WindowInfo, useBackground As Boolean)
-            If _lastPopupLocation.HasValue Then
-                ButtonClicker.ClickInWindow(targetWindow.Handle,
-                    _lastPopupLocation.Value.X, _lastPopupLocation.Value.Y, useBackground, ClickButton.Left)
-                Thread.Sleep(500)
-                ' 한번 더 클릭 (확인 버튼이 있을 수 있음)
-                ButtonClicker.ClickInWindow(targetWindow.Handle,
-                    _lastPopupLocation.Value.X, _lastPopupLocation.Value.Y, useBackground, ClickButton.Left)
-                _lastPopupLocation = Nothing
-            End If
-        End Sub
+        Private Function CheckMacroPatterns(screenshot As Bitmap, items As List(Of MacroItem),
+                                             targetWindow As WindowFinder.WindowInfo,
+                                             useBackground As Boolean) As String
+            For Each mi In items
+                If Not mi.IsAI Then Continue For
+                If mi.Threshold <= 0 Then Continue For
+                If mi.Image Is Nothing OrElse mi.Image.Width <= 1 Then Continue For
+
+                Dim result = ButtonFinder.FindByTemplate(screenshot, mi.Image, mi.Threshold, mi.Mask)
+                If result.Found Then
+                    Dim clickX As Integer
+                    Dim clickY As Integer
+                    If mi.ClickOffsetX >= 0 Then
+                        clickX = result.MatchRect.X + mi.ClickOffsetX
+                        clickY = result.MatchRect.Y + mi.ClickOffsetY
+                    Else
+                        clickX = result.Location.X
+                        clickY = result.Location.Y
+                    End If
+
+                    ButtonClicker.ClickInWindow(targetWindow.Handle, clickX, clickY, useBackground, mi.Button)
+                    Thread.Sleep(500)
+
+                    ' 키전송이 있으면 실행
+                    If Not String.IsNullOrEmpty(mi.SendKeys) Then
+                        SendKeysToWindow(targetWindow.Handle, mi.SendKeys, useBackground)
+                    End If
+
+                    Return mi.Name
+                End If
+            Next
+            Return Nothing
+        End Function
 
         ''' <summary>
         ''' 내 차례 감지: 내 기물 주변에 빛남 효과가 나타날 때까지 대기
@@ -204,7 +222,9 @@ Namespace MacroAutoControl
                                        targetWindow As WindowFinder.WindowInfo,
                                        ownerForm As Form,
                                        index As Integer, totalCount As Integer,
-                                       currentRepeat As Integer, totalRepeat As Integer) As Board
+                                       currentRepeat As Integer, totalRepeat As Integer,
+                                       Optional items As List(Of MacroItem) = Nothing,
+                                       Optional useBackground As Boolean = False) As Board
             Dim recognizer = GetRecognizer()
             Dim pollCount = 0
             Dim mySide As String = Nothing  ' 첫 감지 후 고정
@@ -229,16 +249,6 @@ Namespace MacroAutoControl
                 Dim screenshot = WindowFinder.CaptureWindow(targetWindow.Handle)
                 If screenshot Is Nothing Then Continue While
 
-                ' 게임 결과 팝업 감지
-                Dim gameResult = DetectGameResult(screenshot)
-                If gameResult IsNot Nothing Then
-                    screenshot.Dispose()
-                    ' 팝업 클릭하여 닫기
-                    ClickGameResultPopup(targetWindow, False)
-                    _gameEndReason = gameResult
-                    Return Nothing
-                End If
-
                 ' Mat 변환
                 Dim mat As Mat = Nothing
                 Try
@@ -258,6 +268,25 @@ Namespace MacroAutoControl
                 Dim board = recognizer.GetBoardState(mat)
                 If board Is Nothing Then
                     _recognitionFailCount += 1
+
+                    ' 보드 미감지 시 매크로 목록의 패턴매칭 확인 → 클릭 후 계속 대기
+                    If items IsNot Nothing AndAlso _recognitionFailCount >= 2 Then
+                        Dim matched = CheckMacroPatterns(screenshot, items, targetWindow, useBackground)
+                        If matched IsNot Nothing Then
+                            ' "종료" 포함 패턴 → AI엔진 종료
+                            If matched.Contains("종료") Then
+                                mat.Dispose()
+                                screenshot.Dispose()
+                                _gameEndReason = $"패턴매칭 종료: {matched}"
+                                Return Nothing
+                            End If
+                            _recognitionFailCount = 0
+                            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                                $"AI: 패턴매칭 클릭: {matched} → 계속 대기...", currentRepeat, totalRepeat)
+                            Application.DoEvents()
+                        End If
+                    End If
+
                     If _recognitionFailCount > 10 Then
                         mat.Dispose()
                         screenshot.Dispose()
@@ -670,9 +699,12 @@ Namespace MacroAutoControl
                             targetWindow = defaultWindow
                         End If
 
-                        If item.IsAI Then
+                        If item.IsAI AndAlso item.Image IsNot Nothing AndAlso item.Image.Width > 1 Then
+                            ' AI+패턴 항목: 실행 시 스킵 (CheckMacroPatterns에서 사용)
+                            Continue For
+                        ElseIf item.IsAI Then
                             ' AI 항목 실행
-                            Dim gameEnded = ExecuteAIItem(item, i, items.Count, targetWindow, ownerForm, useBackground, currentRepeat, totalRepeat)
+                            Dim gameEnded = ExecuteAIItem(item, i, items.Count, targetWindow, ownerForm, useBackground, currentRepeat, totalRepeat, items)
                             If _cancelRequested Then
                                 RaiseEvent MacroCompleted(False, $"매크로 중지됨 (반복 {currentRepeat}, AI)")
                                 Return
@@ -877,7 +909,8 @@ Namespace MacroAutoControl
         Private Function ExecuteAIItem(item As MacroItem, index As Integer, totalCount As Integer,
                                    targetWindow As WindowFinder.WindowInfo,
                                    ownerForm As Form, useBackground As Boolean,
-                                   currentRepeat As Integer, totalRepeat As Integer) As Boolean
+                                   currentRepeat As Integer, totalRepeat As Integer,
+                                   Optional items As List(Of MacroItem) = Nothing) As Boolean
 
             _currentAIItem = item
             Dim recognizer = GetRecognizer()
@@ -888,7 +921,7 @@ Namespace MacroAutoControl
 
             ' 0. 내 차례 감지: 기물 주변 빛남이 나타날 때까지 대기
             board = WaitForMyTurn(item, targetWindow, ownerForm, index, totalCount,
-                                 currentRepeat, totalRepeat)
+                                 currentRepeat, totalRepeat, items, useBackground)
             If board Is Nothing Then
                 If _gameEndReason IsNot Nothing Then
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {_gameEndReason} → 클릭 후 다음", currentRepeat, totalRepeat)
@@ -912,9 +945,15 @@ Namespace MacroAutoControl
                 End If
 
                 If _recognitionFailCount > 1 Then
-                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 재시도 {_recognitionFailCount}/10...", currentRepeat, totalRepeat)
+                    Dim failDelay = Math.Max(1000, item.DelayAfterClick)
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 재시도 {_recognitionFailCount}/10 ({failDelay / 1000.0:F1}초)...", currentRepeat, totalRepeat)
                     Application.DoEvents()
-                    Thread.Sleep(1000)
+                    Dim fd = 0
+                    While fd < failDelay AndAlso Not _cancelRequested
+                        Thread.Sleep(100)
+                        fd += 100
+                        Application.DoEvents()
+                    End While
                 Else
                     RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, "AI: 캡처 중...", currentRepeat, totalRepeat)
                     Application.DoEvents()
@@ -926,20 +965,6 @@ Namespace MacroAutoControl
                 If _cancelRequested Then
                     screenshot.Dispose()
                     Return False
-                End If
-
-                ' 게임 결과 팝업 감지
-                Dim gameResult = DetectGameResult(screenshot)
-                If gameResult IsNot Nothing Then
-                    screenshot.Dispose()
-                    ' 팝업 클릭하여 닫기
-                    ClickGameResultPopup(targetWindow, useBackground)
-                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"팝업 감지: {gameResult} → 클릭 후 다음", currentRepeat, totalRepeat)
-                    _recognizer?.ResetGrid()
-                    _gameHashHistory.Clear()
-                    _gameAIMoves.Clear()
-                    _watchPreviousBoard = Nothing
-                    Return False  ' 다음 매크로 항목으로
                 End If
 
                 Dim mat As Mat = Nothing
@@ -996,9 +1021,15 @@ Namespace MacroAutoControl
 
             If Not result.BestMove.HasValue Then
                 capturedBmp?.Dispose()
-                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 1초 후 재시도...", currentRepeat, totalRepeat)
+                Dim retryDelay = Math.Max(1000, item.DelayAfterClick)
+                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → {retryDelay / 1000.0:F1}초 후 재시도...", currentRepeat, totalRepeat)
                 Application.DoEvents()
-                Thread.Sleep(1000)
+                Dim rd = 0
+                While rd < retryDelay AndAlso Not _cancelRequested
+                    Thread.Sleep(100)
+                    rd += 100
+                    Application.DoEvents()
+                End While
                 If _cancelRequested Then Return False
 
                 ' 재캡처 + 재인식 + 재탐색
@@ -1191,12 +1222,23 @@ Namespace MacroAutoControl
             End If
             For i = 0 To items.Count - 1
                 Dim item = items(i)
-                If item.IsAI Then
-                    ' AI 항목: AI|이름|대기|임계값|버튼|키|AI진영|AI깊이|AI시간
-                    lines.Add($"AI|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|0||{item.AISide}|{item.AIDepth}|{item.AITime:F1}|{item.WindowTitle}")
+                If item.IsAI AndAlso item.Image IsNot Nothing AndAlso item.Image.Width > 1 Then
+                    ' AI패턴 항목: 이미지파일|이름|AI패턴|임계값|버튼|키|클릭X|클릭Y|창
+                    Dim imgFileName = $"{SanitizeFileName(item.Name)}.png"
+                    lines.Add($"{imgFileName}|{item.Name}|AI패턴|{item.Threshold:F2}|{CInt(item.Button)}|{item.SendKeys}|{item.ClickOffsetX}|{item.ClickOffsetY}|{item.WindowTitle}")
+                    item.Image.Save(IO.Path.Combine(imgFolder, imgFileName), Imaging.ImageFormat.Png)
+                    If item.Mask IsNot Nothing Then
+                        Dim maskFileName = $"{SanitizeFileName(item.Name)}_mask.png"
+                        item.Mask.Save(IO.Path.Combine(imgFolder, maskFileName), Imaging.ImageFormat.Png)
+                    End If
+                ElseIf item.IsAI Then
+                    ' 순수 AI 항목: AI|이름|대기(초)|임계값|버튼|키|AI진영|AI깊이|AI시간|창
+                    Dim aiDelaySec = item.DelayAfterClick / 1000.0
+                    lines.Add($"AI|{item.Name}|{aiDelaySec:F1}|{item.Threshold:F2}|0||{item.AISide}|{item.AIDepth}|{item.AITime:F1}|{item.WindowTitle}")
                 Else
                     Dim imgFileName = $"{SanitizeFileName(item.Name)}.png"
-                    lines.Add($"{imgFileName}|{item.Name}|{item.DelayAfterClick}|{item.Threshold:F2}|{CInt(item.Button)}|{item.SendKeys}|{item.ClickOffsetX}|{item.ClickOffsetY}|{item.WindowTitle}")
+                    Dim delaySec = item.DelayAfterClick / 1000.0
+                    lines.Add($"{imgFileName}|{item.Name}|{delaySec:F1}|{item.Threshold:F2}|{CInt(item.Button)}|{item.SendKeys}|{item.ClickOffsetX}|{item.ClickOffsetY}|{item.WindowTitle}")
                     ' 이미지를 폴더에 저장
                     item.Image.Save(IO.Path.Combine(imgFolder, imgFileName), Imaging.ImageFormat.Png)
                     ' 마스크 저장
@@ -1243,7 +1285,9 @@ Namespace MacroAutoControl
                     Dim aiItem As New MacroItem()
                     aiItem.IsAI = True
                     aiItem.Name = parts(1).Trim()
-                    Integer.TryParse(parts(2).Trim(), aiItem.DelayAfterClick)
+                    Dim aiDelayVal As Double
+                    Double.TryParse(parts(2).Trim(), aiDelayVal)
+                    aiItem.DelayAfterClick = If(aiDelayVal < 100, CInt(aiDelayVal * 1000), CInt(aiDelayVal))
                     aiItem.Threshold = -1
                     aiItem.Image = New Bitmap(1, 1)
                     If parts.Length >= 7 Then
@@ -1262,7 +1306,9 @@ Namespace MacroAutoControl
                     Continue For
                 End If
 
-                ' 일반 항목
+                ' AI패턴 항목 감지: 3번째 필드가 "AI패턴"
+                Dim isAIPattern = (parts.Length >= 3 AndAlso parts(2).Trim() = "AI패턴")
+
                 Dim item As New MacroItem()
                 item.Name = parts(1).Trim()
 
@@ -1289,8 +1335,20 @@ Namespace MacroAutoControl
                     End Using
                 End If
 
-                Integer.TryParse(parts(2).Trim(), item.DelayAfterClick)
-                Double.TryParse(parts(3).Trim(), item.Threshold)
+                If isAIPattern Then
+                    ' AI패턴 항목: IsAI=True, 이미지 유지
+                    item.IsAI = True
+                    item.DelayAfterClick = 1000
+                    item.AISide = "AUTO"
+                    item.AIDepth = 1
+                    item.AITime = 1.0
+                    Double.TryParse(parts(3).Trim(), item.Threshold)
+                Else
+                    Dim delayVal As Double
+                    Double.TryParse(parts(2).Trim(), delayVal)
+                    item.DelayAfterClick = If(delayVal < 100, CInt(delayVal * 1000), CInt(delayVal))
+                    Double.TryParse(parts(3).Trim(), item.Threshold)
+                End If
                 If parts.Length >= 5 Then
                     Dim btnVal As Integer
                     If Integer.TryParse(parts(4).Trim(), btnVal) Then

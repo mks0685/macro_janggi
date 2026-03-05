@@ -18,6 +18,7 @@ Namespace MacroAutoControl
         Private picTemplate As PictureBox
         Private lblTemplate As Label
         Private WithEvents btnMacroAdd As Button
+        Private WithEvents btnAIPattern As Button
         Private WithEvents btnMacroDelete As Button
         Private WithEvents btnMacroUp As Button
         Private WithEvents btnMacroDown As Button
@@ -239,7 +240,7 @@ Namespace MacroAutoControl
             ' === 옵션 행 1: 클릭 항목 추가 ===
             ' [대기(ms): 54px][4px][nud 64px][4px][임계: 28px][4px][nud 48px][4px][cbo 63px][4px][btn 65px]
             Dim lblDelay As New Label() With {
-                .Text = "대기",
+                .Text = "대기(초)",
                 .Location = New Point(c1, gy + 4),
                 .Size = New Size(lblW, 18),
                 .AutoSize = False
@@ -250,9 +251,10 @@ Namespace MacroAutoControl
                 .Location = New Point(c2, gy),
                 .Size = New Size(c3 - c2 - 4, 25),
                 .Minimum = 0,
-                .Maximum = 30000,
-                .Value = 1000,
-                .Increment = 100
+                .Maximum = 30,
+                .Value = 1,
+                .Increment = 1,
+                .DecimalPlaces = 1
             }
             grpMacro.Controls.Add(nudDelay)
             AddHandler nudDelay.ValueChanged, AddressOf nudDelay_ValueChanged
@@ -275,6 +277,7 @@ Namespace MacroAutoControl
                 .DecimalPlaces = 0
             }
             grpMacro.Controls.Add(nudThreshold)
+            AddHandler nudThreshold.ValueChanged, AddressOf nudThreshold_ValueChanged
 
             cboMouseButton = New ComboBox() With {
                 .Location = New Point(c5, gy),
@@ -284,6 +287,7 @@ Namespace MacroAutoControl
             cboMouseButton.Items.AddRange({"좌클릭", "우클릭"})
             cboMouseButton.SelectedIndex = 0
             grpMacro.Controls.Add(cboMouseButton)
+            AddHandler cboMouseButton.SelectedIndexChanged, AddressOf cboMouseButton_SelectedIndexChanged
 
             btnMacroAdd = New Button() With {
                 .Text = "추가 ▼",
@@ -307,9 +311,10 @@ Namespace MacroAutoControl
                 .Location = New Point(c2, gy),
                 .Size = New Size(c3 - c2 - 4, 25),
                 .Minimum = 0,
-                .Maximum = 30000,
-                .Value = 1000,
-                .Increment = 100
+                .Maximum = 30,
+                .Value = 1,
+                .Increment = 1,
+                .DecimalPlaces = 1
             }
             grpMacro.Controls.Add(nudKeyDelay)
 
@@ -341,13 +346,13 @@ Namespace MacroAutoControl
             ' === 옵션 행 3: AI 항목 추가 (행1과 열 정렬) ===
             ' [대기(ms): c1~c2][nud c2~c3][깊이: c3~c4][nud c4~c5][시간: c5~][nud ~btnX][btn]
             Dim lblAIDelay As New Label() With {
-                .Text = "대기", .Location = New Point(c1, gy + 4), .Size = New Size(lblW, 18), .AutoSize = False
+                .Text = "대기(초)", .Location = New Point(c1, gy + 4), .Size = New Size(lblW, 18), .AutoSize = False
             }
             grpMacro.Controls.Add(lblAIDelay)
 
             nudAIDelay = New NumericUpDown() With {
                 .Location = New Point(c2, gy), .Size = New Size(c3 - c2 - 4, 25),
-                .Minimum = 0, .Maximum = 10000, .Value = 1000, .Increment = 100
+                .Minimum = 0, .Maximum = 30, .Value = 1, .Increment = 1, .DecimalPlaces = 1
             }
             grpMacro.Controls.Add(nudAIDelay)
 
@@ -428,45 +433,53 @@ Namespace MacroAutoControl
             AddHandler lstMacro.MouseDown, AddressOf lstMacro_MouseDown
             gy += 134
 
-            ' 삭제, 위로, 아래로, SAVE, LOAD
-            Dim fifthW = CInt((pw - 38) / 5)
+            ' AI패턴, 삭제, 위로, 아래로, SAVE, LOAD
+            Dim sixthW = CInt((pw - 42) / 6)
+
+            btnAIPattern = New Button() With {
+                .Text = "AI패턴",
+                .Location = New Point(10, gy),
+                .Size = New Size(sixthW, 26),
+                .Enabled = False
+            }
+            grpMacro.Controls.Add(btnAIPattern)
 
             btnMacroDelete = New Button() With {
                 .Text = "삭제",
-                .Location = New Point(10, gy),
-                .Size = New Size(fifthW, 26),
+                .Location = New Point(10 + (sixthW + 3) * 1, gy),
+                .Size = New Size(sixthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroDelete)
 
             btnMacroUp = New Button() With {
                 .Text = "▲",
-                .Location = New Point(10 + (fifthW + 4) * 1, gy),
-                .Size = New Size(fifthW, 26),
+                .Location = New Point(10 + (sixthW + 3) * 2, gy),
+                .Size = New Size(sixthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroUp)
 
             btnMacroDown = New Button() With {
                 .Text = "▼",
-                .Location = New Point(10 + (fifthW + 4) * 2, gy),
-                .Size = New Size(fifthW, 26),
+                .Location = New Point(10 + (sixthW + 3) * 3, gy),
+                .Size = New Size(sixthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroDown)
 
             btnMacroSave = New Button() With {
                 .Text = "SAVE",
-                .Location = New Point(10 + (fifthW + 4) * 3, gy),
-                .Size = New Size(fifthW, 26),
+                .Location = New Point(10 + (sixthW + 3) * 4, gy),
+                .Size = New Size(sixthW, 26),
                 .Enabled = False
             }
             grpMacro.Controls.Add(btnMacroSave)
 
             btnMacroLoad = New Button() With {
                 .Text = "LOAD",
-                .Location = New Point(10 + (fifthW + 4) * 4, gy),
-                .Size = New Size(fifthW, 26)
+                .Location = New Point(10 + (sixthW + 3) * 5, gy),
+                .Size = New Size(sixthW, 26)
             }
             grpMacro.Controls.Add(btnMacroLoad)
             gy += 30
@@ -730,6 +743,18 @@ Namespace MacroAutoControl
                         ShowPreviewWithClick(_templateRect, _clickOffset)
                         lblTemplate.Text = $"템플릿: {_templateRect.Width}x{_templateRect.Height} px, 클릭:{_clickOffset.X},{_clickOffset.Y}"
                         UpdateStatus($"클릭 위치 설정: ({_clickOffset.X},{_clickOffset.Y}) - 템플릿 좌상단 기준")
+                        ' 선택된 AI패턴 항목에 클릭 위치 반영
+                        Dim selIdx = lstMacro.SelectedIndex
+                        If selIdx >= 0 AndAlso selIdx < _macroItems.Count Then
+                            Dim selItem = _macroItems(selIdx)
+                            If selItem.IsAI AndAlso selItem.Image IsNot Nothing AndAlso selItem.Image.Width > 1 Then
+                                selItem.ClickOffsetX = _clickOffset.X
+                                selItem.ClickOffsetY = _clickOffset.Y
+                                _updatingFromSelection = True
+                                lstMacro.Items(selIdx) = $"{selIdx + 1}. {selItem}"
+                                _updatingFromSelection = False
+                            End If
+                        End If
                     End If
                     Return
                 End If
@@ -775,7 +800,8 @@ Namespace MacroAutoControl
                 If idx < 0 OrElse idx >= _macroItems.Count Then Return
 
                 Dim item = _macroItems(idx)
-                If item.Image Is Nothing OrElse item.IsAI Then Return
+                If item.Image Is Nothing Then Return
+                If item.IsAI AndAlso item.Image.Width <= 1 Then Return
 
                 Dim imgRect = GetImageRect(picTemplate, item.Image)
                 If imgRect.Width <= 0 OrElse imgRect.Height <= 0 Then Return
@@ -796,7 +822,8 @@ Namespace MacroAutoControl
                 item.ClickOffsetY = offsetY
 
                 ' lblTemplate 업데이트
-                lblTemplate.Text = $"[{idx + 1}] {item.Name} ({item.Image.Width}x{item.Image.Height}, 클릭:{offsetX},{offsetY})"
+                Dim prefix = If(item.IsAI, "AI패턴: ", "")
+                lblTemplate.Text = $"[{idx + 1}] {prefix}{item.Name} ({item.Image.Width}x{item.Image.Height}, 클릭:{offsetX},{offsetY})"
 
                 ' Paint 이벤트에서 클릭 위치 + 마스크 함께 표시
                 picTemplate.Invalidate()
@@ -986,7 +1013,7 @@ Namespace MacroAutoControl
             Dim item As New MacroItem(
                 name,
                 _templateImage,
-                CInt(nudDelay.Value),
+                CInt(nudDelay.Value * 1000),
                 nudThreshold.Value / 100.0,
                 clickBtn,
                 "",
@@ -1001,12 +1028,50 @@ Namespace MacroAutoControl
             btnMacroRun.Enabled = (_macroItems.Count > 0 AndAlso _targetWindow IsNot Nothing)
             btnMacroSave.Enabled = (_macroItems.Count > 0)
 
-            ' 원본 스크린샷으로 복원하여 추가 드래그 가능하게
             If _screenshot IsNot Nothing Then
                 SetPreviewImage(_screenshot)
             End If
 
             UpdateStatus($"매크로 항목 추가: {name}. 계속 드래그하여 다음 항목을 추가하세요.")
+        End Sub
+
+        Private Sub btnAIPattern_Click(sender As Object, e As EventArgs) Handles btnAIPattern.Click
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then
+                UpdateStatus("복사할 항목을 선택하세요.")
+                Return
+            End If
+
+            Dim src = _macroItems(idx)
+            If src.Image Is Nothing OrElse src.Image.Width <= 1 Then
+                UpdateStatus("선택된 항목에 이미지가 없습니다.")
+                Return
+            End If
+
+            Dim name = src.Name
+            Dim item = MacroItem.CreateAI(name, 1000, "AUTO", 1, 1.0)
+            item.Image = CType(src.Image.Clone(), Bitmap)
+            item.Threshold = src.Threshold
+            item.Button = src.Button
+            item.SendKeys = src.SendKeys
+            item.ClickOffsetX = src.ClickOffsetX
+            item.ClickOffsetY = src.ClickOffsetY
+            item.Mask = If(src.Mask IsNot Nothing, CType(src.Mask.Clone(), Bitmap), Nothing)
+            item.WindowTitle = If(Not String.IsNullOrEmpty(src.WindowTitle), src.WindowTitle,
+                                  If(_targetWindow IsNot Nothing, _targetWindow.Title, ""))
+
+            _macroItems.Add(item)
+            RefreshMacroList()
+            lstMacro.SelectedIndex = lstMacro.Items.Count - 1
+
+            btnMacroRun.Enabled = (_macroItems.Count > 0 AndAlso _targetWindow IsNot Nothing)
+            btnMacroSave.Enabled = (_macroItems.Count > 0)
+
+            If _screenshot IsNot Nothing Then
+                SetPreviewImage(_screenshot)
+            End If
+
+            UpdateStatus($"AI패턴 항목 추가: {name}")
         End Sub
 
         Private Sub btnKeyAdd_Click(sender As Object, e As EventArgs) Handles btnKeyAdd.Click
@@ -1025,7 +1090,7 @@ Namespace MacroAutoControl
                 item = New MacroItem(
                     $"키전송{keyCount}",
                     _templateImage,
-                    CInt(nudKeyDelay.Value),
+                    CInt(nudKeyDelay.Value * 1000),
                     nudThreshold.Value / 100.0,
                     clickBtn,
                     keys,
@@ -1037,7 +1102,7 @@ Namespace MacroAutoControl
                 item = New MacroItem(
                     $"키전송{keyCount}",
                     dummyImg,
-                    CInt(nudKeyDelay.Value),
+                    CInt(nudKeyDelay.Value * 1000),
                     0.0,
                     ClickButton.Left,
                     keys)
@@ -1062,7 +1127,7 @@ Namespace MacroAutoControl
         End Sub
 
         Private Sub btnAIAdd_Click(sender As Object, e As EventArgs) Handles btnAIAdd.Click
-            Dim delay = CInt(nudAIDelay.Value)
+            Dim delay = CInt(nudAIDelay.Value * 1000)
             Dim depth = CInt(nudAIDepth.Value)
             Dim time = CDbl(nudAITime.Value)
 
@@ -1615,6 +1680,7 @@ Namespace MacroAutoControl
 
         Private Sub lstMacro_SelectedIndexChanged(sender As Object, e As EventArgs)
             Dim hasSelection = (lstMacro.SelectedIndex >= 0)
+            btnAIPattern.Enabled = hasSelection
             btnMacroDelete.Enabled = hasSelection
             btnMacroUp.Enabled = (lstMacro.SelectedIndex > 0)
             btnMacroDown.Enabled = (hasSelection AndAlso lstMacro.SelectedIndex < _macroItems.Count - 1)
@@ -1623,9 +1689,13 @@ Namespace MacroAutoControl
             If hasSelection AndAlso lstMacro.SelectedIndex < _macroItems.Count Then
                 Dim item = _macroItems(lstMacro.SelectedIndex)
 
-                ' 대기시간을 nudDelay에 반영
+                ' 대기시간/임계값/버튼을 컨트롤에 반영
                 _updatingFromSelection = True
-                nudDelay.Value = Math.Max(nudDelay.Minimum, Math.Min(nudDelay.Maximum, item.DelayAfterClick))
+                nudDelay.Value = Math.Max(nudDelay.Minimum, Math.Min(nudDelay.Maximum, CDec(item.DelayAfterClick / 1000.0)))
+                If item.Threshold > 0 Then
+                    nudThreshold.Value = Math.Max(nudThreshold.Minimum, Math.Min(nudThreshold.Maximum, CDec(item.Threshold * 100)))
+                End If
+                cboMouseButton.SelectedIndex = If(item.Button = ClickButton.Right, 1, 0)
                 _updatingFromSelection = False
 
                 ' 마스크 모드 상태 반영
@@ -1639,7 +1709,16 @@ Namespace MacroAutoControl
                 End If
 
                 Try
-                    If item.IsAI Then
+                    If item.IsAI AndAlso item.Image IsNot Nothing AndAlso item.Image.Width > 1 Then
+                        ' AI패턴 항목: 이미지 표시 + 클릭위치 변경 가능
+                        picTemplate.Image = item.Image
+                        _templateImage = CType(item.Image.Clone(), Bitmap)
+                        _clickOffset = New Point(item.ClickOffsetX, item.ClickOffsetY)
+                        _templateRect = New Rectangle(0, 0, item.Image.Width, item.Image.Height)
+                        Dim clickInfo = If(item.ClickOffsetX >= 0, $", 클릭:{item.ClickOffsetX},{item.ClickOffsetY}", ", 클릭:중앙")
+                        lblTemplate.Text = $"[{lstMacro.SelectedIndex + 1}] AI패턴: {item.Name} ({item.Image.Width}x{item.Image.Height}{clickInfo})"
+                        BeginInvoke(Sub() picTemplate.Invalidate())
+                    ElseIf item.IsAI Then
                         picTemplate.Image = Nothing
                         Dim sideText = If(item.AISide = "C", "초", "한")
                         lblTemplate.Text = $"[{lstMacro.SelectedIndex + 1}] AI: {sideText} 깊이:{item.AIDepth} 시간:{item.AITime:F0}s"
@@ -1647,6 +1726,7 @@ Namespace MacroAutoControl
                         picTemplate.Image = item.Image
                         Dim clickInfo = If(item.ClickOffsetX >= 0, $", 클릭:{item.ClickOffsetX},{item.ClickOffsetY}", ", 클릭:중앙")
                         lblTemplate.Text = $"[{lstMacro.SelectedIndex + 1}] {item.Name} ({item.Image.Width}x{item.Image.Height}{clickInfo})"
+                        BeginInvoke(Sub() picTemplate.Invalidate())
                     Else
                         picTemplate.Image = Nothing
                         lblTemplate.Text = $"[{lstMacro.SelectedIndex + 1}] {item.Name}"
@@ -1662,8 +1742,28 @@ Namespace MacroAutoControl
             If _updatingFromSelection Then Return
             Dim idx = lstMacro.SelectedIndex
             If idx < 0 OrElse idx >= _macroItems.Count Then Return
-            _macroItems(idx).DelayAfterClick = CInt(nudDelay.Value)
+            _macroItems(idx).DelayAfterClick = CInt(nudDelay.Value * 1000)
             ' 리스트 텍스트 갱신 (SelectedIndexChanged 재발 방지)
+            _updatingFromSelection = True
+            lstMacro.Items(idx) = $"{idx + 1}. {_macroItems(idx)}"
+            _updatingFromSelection = False
+        End Sub
+
+        Private Sub nudThreshold_ValueChanged(sender As Object, e As EventArgs)
+            If _updatingFromSelection Then Return
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            _macroItems(idx).Threshold = nudThreshold.Value / 100.0
+            _updatingFromSelection = True
+            lstMacro.Items(idx) = $"{idx + 1}. {_macroItems(idx)}"
+            _updatingFromSelection = False
+        End Sub
+
+        Private Sub cboMouseButton_SelectedIndexChanged(sender As Object, e As EventArgs)
+            If _updatingFromSelection Then Return
+            Dim idx = lstMacro.SelectedIndex
+            If idx < 0 OrElse idx >= _macroItems.Count Then Return
+            _macroItems(idx).Button = If(cboMouseButton.SelectedIndex = 1, ClickButton.Right, ClickButton.Left)
             _updatingFromSelection = True
             lstMacro.Items(idx) = $"{idx + 1}. {_macroItems(idx)}"
             _updatingFromSelection = False
@@ -1738,7 +1838,54 @@ Namespace MacroAutoControl
                 End If
             End If
 
-            If Not AutoSelectJanggiWindow() Then Return
+            If Not AutoSelectJanggiWindow() Then
+                ' 창 없으면 현재 스크린샷에서 매칭 결과 표시
+                If _screenshot IsNot Nothing AndAlso item.Image IsNot Nothing AndAlso item.Image.Width > 1 Then
+                    Dim result = ButtonFinder.FindByTemplate(_screenshot, item.Image, item.Threshold, item.Mask)
+                    Dim prefix = If(item.IsAI, "AI패턴", "패턴")
+                    If result.Found Then
+                        Dim clickX = If(item.ClickOffsetX >= 0, result.MatchRect.X + item.ClickOffsetX, result.Location.X)
+                        Dim clickY = If(item.ClickOffsetY >= 0, result.MatchRect.Y + item.ClickOffsetY, result.Location.Y)
+                        _templateRect = result.MatchRect
+                        _clickOffset = New Point(item.ClickOffsetX, item.ClickOffsetY)
+                        ShowPreviewWithClick(_templateRect, _clickOffset)
+                        UpdateStatus($"{prefix} 발견: {item.Name} ({clickX},{clickY}) 신뢰도:{result.Confidence:P0} (창 없음)")
+                    Else
+                        UpdateStatus($"{prefix} 미발견: {item.Name} 신뢰도:{result.Confidence:P0} (창 없음)")
+                    End If
+                Else
+                    UpdateStatus("대상 창을 찾을 수 없습니다.")
+                End If
+                Return
+            End If
+
+            ' AI+패턴 항목: 캡처 → 매칭 → 클릭
+            If item.IsAI AndAlso item.Image IsNot Nothing AndAlso item.Image.Width > 1 Then
+                Dim screenshot = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                If screenshot IsNot Nothing Then
+                    _screenshot?.Dispose()
+                    _screenshot = CType(screenshot.Clone(), Bitmap)
+                    SetPreviewImage(_screenshot)
+                End If
+                If screenshot Is Nothing Then
+                    UpdateStatus("캡처 실패")
+                    Return
+                End If
+                Dim result = ButtonFinder.FindByTemplate(screenshot, item.Image, item.Threshold, item.Mask)
+                If result.Found Then
+                    Dim clickX = If(item.ClickOffsetX >= 0, result.MatchRect.X + item.ClickOffsetX, result.Location.X)
+                    Dim clickY = If(item.ClickOffsetY >= 0, result.MatchRect.Y + item.ClickOffsetY, result.Location.Y)
+                    _templateRect = result.MatchRect
+                    _clickOffset = New Point(item.ClickOffsetX, item.ClickOffsetY)
+                    ShowPreviewWithClick(_templateRect, _clickOffset)
+                    ButtonClicker.ClickInWindow(_targetWindow.Handle, clickX, clickY, chkBackground.Checked, item.Button)
+                    UpdateStatus($"AI패턴 클릭: {item.Name} ({clickX},{clickY}) 신뢰도:{result.Confidence:P0}")
+                Else
+                    UpdateStatus($"AI패턴 미발견: {item.Name} 신뢰도:{result.Confidence:P0}")
+                End If
+                screenshot.Dispose()
+                Return
+            End If
 
             _isDroppedImage = False
             Dim singleItem As New List(Of MacroItem) From {item}
@@ -1792,7 +1939,7 @@ Namespace MacroAutoControl
         Private Sub CommitDelayToSelected()
             Dim idx = lstMacro.SelectedIndex
             If idx >= 0 AndAlso idx < _macroItems.Count Then
-                _macroItems(idx).DelayAfterClick = CInt(nudDelay.Value)
+                _macroItems(idx).DelayAfterClick = CInt(nudDelay.Value * 1000)
             End If
         End Sub
 
@@ -2001,6 +2148,7 @@ Namespace MacroAutoControl
             btnMacroStop.Enabled = running
             btnForceMyTurn.Enabled = running
             btnMacroAdd.Enabled = Not running
+            btnAIPattern.Enabled = Not running
             btnMacroDelete.Enabled = Not running
             btnMacroUp.Enabled = Not running
             btnMacroDown.Enabled = Not running

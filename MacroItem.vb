@@ -65,18 +65,33 @@ Namespace MacroAutoControl
             End Get
         End Property
 
+        Private ReadOnly Property DelayText As String
+            Get
+                Dim sec = DelayAfterClick / 1000.0
+                If sec = Math.Floor(sec) Then
+                    Return $"{CInt(sec)}초"
+                Else
+                    Return $"{sec:F1}초"
+                End If
+            End Get
+        End Property
+
         Public Overrides Function ToString() As String
             Dim winTag = If(String.IsNullOrEmpty(WindowTitle), "", $" [{WindowTitle}]")
             If IsAI Then
-                Return $"{Name} (대기:{DelayAfterClick}ms, 깊이:{AIDepth}, 시간:{AITime:F0}s){winTag}"
+                If Image IsNot Nothing AndAlso Image.Width > 1 Then
+                    Dim clickInfo = If(ClickOffsetX >= 0, $",{ButtonText}:{ClickOffsetX},{ClickOffsetY}", "")
+                    Return $"{Name} (AI패턴{clickInfo}){winTag}"
+                End If
+                Return $"{Name} (대기:{DelayText}, 깊이:{AIDepth}, 시간:{AITime:F0}s){winTag}"
             End If
             ' 키전송 전용 항목 (Threshold=0, SendKeys 있음)
             If Threshold <= 0 AndAlso Not String.IsNullOrEmpty(SendKeys) Then
-                Return $"{Name} (대기:{DelayAfterClick}ms, {SendKeys}){winTag}"
+                Return $"{Name} (대기:{DelayText}, {SendKeys}){winTag}"
             End If
             Dim keyInfo = If(String.IsNullOrEmpty(SendKeys), "", $", 키:{SendKeys}")
-            Dim clickPos = If(ClickOffsetX >= 0, $", 클릭:{ClickOffsetX},{ClickOffsetY}", "")
-            Return $"{Name} ({ButtonText}, 대기:{DelayAfterClick}ms{clickPos}{keyInfo}){winTag}"
+            Dim clickPos = If(ClickOffsetX >= 0, $",{ButtonText}:{ClickOffsetX},{ClickOffsetY}", "")
+            Return $"{Name} (대기:{DelayText}{clickPos}{keyInfo}){winTag}"
         End Function
 
         Public Sub Dispose()
