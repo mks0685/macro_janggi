@@ -49,8 +49,7 @@ Namespace MacroAutoControl
 
         ' 게임 결과 팝업 템플릿
         Private Shared ReadOnly TEMPLATES_DIR As String =
-            IO.Path.Combine(IO.Path.GetDirectoryName(
-                System.Reflection.Assembly.GetExecutingAssembly().Location), "templates")
+            IO.Path.Combine(AppContext.BaseDirectory, "templates")
 
         Private Shared ReadOnly RESULT_TEMPLATES As String()() = {
             New String() {"result_invalid.png", "무효대국"},

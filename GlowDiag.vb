@@ -12,7 +12,7 @@ Namespace MacroAutoControl
 
         Public Sub RunDiagnostic()
             Dim log As New List(Of String)
-            Dim baseDir = IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)
+            Dim baseDir = AppContext.BaseDirectory
             Dim outPath = IO.Path.Combine(baseDir, "glow_diag.txt")
             Dim imgPath = IO.Path.Combine(baseDir, "glow_diag.png")
 

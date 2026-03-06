@@ -22,8 +22,7 @@ Namespace MacroAutoControl.Capture
         Private _resultTemplates As New Dictionary(Of String, (Color As Mat, Gray As Mat))
 
         Private Shared ReadOnly TEMPLATES_DIR As String =
-            IO.Path.Combine(IO.Path.GetDirectoryName(
-                System.Reflection.Assembly.GetExecutingAssembly().Location), "templates")
+            IO.Path.Combine(AppContext.BaseDirectory, "templates")
 
         Private Shared ReadOnly ALL_PIECES As String() =
             {CK, CS, CC, CM, CE, CP, CJ, HK, HS, HC, HM, HE, HP, HB}
@@ -62,6 +61,15 @@ Namespace MacroAutoControl.Capture
             {"result_invalid", "무효"}
         }
 
+        ''' <summary>
+        ''' 템플릿 키("CC_1" 등)에서 기물 코드("CC")를 추출
+        ''' </summary>
+        Private Shared Function GetPieceCode(templateKey As String) As String
+            Dim idx = templateKey.IndexOf("_"c)
+            If idx > 0 Then Return templateKey.Substring(0, idx)
+            Return templateKey
+        End Function
+
         Public Function LoadTemplates(Optional templatesDir As String = Nothing) As Integer
             If templatesDir Is Nothing Then templatesDir = TEMPLATES_DIR
             If Not IO.Directory.Exists(templatesDir) Then
@@ -71,6 +79,7 @@ Namespace MacroAutoControl.Capture
 
             Dim loaded = 0
             For Each pieceCode In ALL_PIECES
+                ' 기본 템플릿 로드 (CC.png 등)
                 Dim path = IO.Path.Combine(templatesDir, $"{pieceCode}.png")
                 If IO.File.Exists(path) Then
                     Dim tmpl = Cv2.ImRead(path, ImreadModes.Color)
@@ -82,6 +91,20 @@ Namespace MacroAutoControl.Capture
                         loaded += 1
                     End If
                 End If
+                ' 변형 템플릿 로드 (CC_1.png, CC_2.png 등)
+                For suffix = 1 To 9
+                    Dim varPath = IO.Path.Combine(templatesDir, $"{pieceCode}_{suffix}.png")
+                    If Not IO.File.Exists(varPath) Then Exit For
+                    Dim varTmpl = Cv2.ImRead(varPath, ImreadModes.Color)
+                    If varTmpl IsNot Nothing AndAlso Not varTmpl.Empty() Then
+                        Dim varKey = $"{pieceCode}_{suffix}"
+                        _templates(varKey) = varTmpl
+                        Dim gray As New Mat()
+                        Cv2.CvtColor(varTmpl, gray, ColorConversionCodes.BGR2GRAY)
+                        _templatesGray(varKey) = gray
+                        loaded += 1
+                    End If
+                Next
             Next
             ' 스케일별 템플릿 사전 캐싱
             For Each scale In {0.88, 0.94, 1.06, 1.12}
@@ -413,26 +436,36 @@ Namespace MacroAutoControl.Capture
             Dim mr1 As New Mat()
             Dim mr2 As New Mat()
             Dim mb As New Mat()
+            Dim my As New Mat()
             Try
                 Cv2.CvtColor(center, hsv, ColorConversionCodes.BGR2HSV)
 
+                ' 빨간색 (한/HAN): H 0~12 또는 158~180
                 Cv2.InRange(hsv, New Scalar(0, 40, 60), New Scalar(12, 255, 255), mr1)
                 Cv2.InRange(hsv, New Scalar(158, 40, 60), New Scalar(180, 255, 255), mr2)
                 Dim redPx = Cv2.CountNonZero(mr1) + Cv2.CountNonZero(mr2)
 
+                ' 파란색 (초/CHO - 기존 테마): H 85~135
                 Cv2.InRange(hsv, New Scalar(85, 40, 60), New Scalar(135, 255, 255), mb)
                 Dim bluePx = Cv2.CountNonZero(mb)
 
+                ' 노란/초록색 (초/CHO - 새 테마): H 20~55, S > 80, V > 100
+                Cv2.InRange(hsv, New Scalar(20, 80, 100), New Scalar(55, 255, 255), my)
+                Dim yellowPx = Cv2.CountNonZero(my)
+
+                ' 초(CHO) = 파란색 + 노란색 합산
+                Dim choPx = bluePx + yellowPx
+
                 Dim total = center.Rows * center.Cols
 
-                ' 30% 이상 파란색이면 초(CHO), 30% 이상 빨간색이면 한(HAN)
-                If bluePx >= total * 0.3 Then Return CHO
+                ' 30% 이상이면 확정
+                If choPx >= total * 0.3 Then Return CHO
                 If redPx >= total * 0.3 Then Return HAN
 
                 ' 비율 미달 시 상대 비교
                 Dim minPx = Math.Max(10, total * 0.02)
-                If redPx > minPx AndAlso redPx > bluePx * 1.3 Then Return HAN
-                If bluePx > minPx AndAlso bluePx > redPx * 1.3 Then Return CHO
+                If redPx > minPx AndAlso redPx > choPx * 1.3 Then Return HAN
+                If choPx > minPx AndAlso choPx > redPx * 1.3 Then Return CHO
                 Return Nothing
             Finally
                 center.Dispose()
@@ -440,6 +473,7 @@ Namespace MacroAutoControl.Capture
                 mr1.Dispose()
                 mr2.Dispose()
                 mb.Dispose()
+                my.Dispose()
             End Try
         End Function
 
@@ -495,7 +529,7 @@ Namespace MacroAutoControl.Capture
                         result.MinMaxLoc(Nothing, maxVal)
                         If maxVal > bestScore Then
                             bestScore = maxVal
-                            bestMatch = kvp.Key
+                            bestMatch = GetPieceCode(kvp.Key)
                         End If
                     End Using
                 Next
@@ -522,7 +556,7 @@ Namespace MacroAutoControl.Capture
                             result.MinMaxLoc(Nothing, maxVal)
                             If maxVal > bestScore Then
                                 bestScore = maxVal
-                                bestMatch = kvp.Key
+                                bestMatch = GetPieceCode(kvp.Key)
                             End If
                         End Using
                     Next
@@ -557,7 +591,7 @@ Namespace MacroAutoControl.Capture
                                 result.MinMaxLoc(Nothing, maxVal)
                                 If maxVal > grayScore Then
                                     grayScore = maxVal
-                                    grayMatch = kvp.Key
+                                    grayMatch = GetPieceCode(kvp.Key)
                                 End If
                             End Using
                         Next

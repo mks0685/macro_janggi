@@ -25,6 +25,7 @@ Namespace MacroAutoControl
         Private WithEvents btnMacroSave As Button
         Private WithEvents btnMacroLoad As Button
         Private WithEvents btnScreenshot As Button
+        Private WithEvents btnExtractPieces As Button
         Private WithEvents btnForceMyTurn As Button
         Private nudDelay As NumericUpDown
         Private nudThreshold As NumericUpDown
@@ -562,14 +563,23 @@ Namespace MacroAutoControl
             }
             grpActions.Controls.Add(chkBackground)
 
-            ' 스크린샷 저장 버튼
+            ' 스크린샷 저장 / 기물추출 버튼 (가로 2분할)
+            Dim btnActW = CInt((pw - 22 - 4) / 2)
             btnScreenshot = New Button() With {
                 .Text = "스크린샷 저장",
                 .Location = New Point(10, 76),
-                .Size = New Size(pw - 22, 25),
+                .Size = New Size(btnActW, 25),
                 .BackColor = Color.FromArgb(200, 220, 255)
             }
             grpActions.Controls.Add(btnScreenshot)
+
+            btnExtractPieces = New Button() With {
+                .Text = "기물추출",
+                .Location = New Point(10 + btnActW + 4, 76),
+                .Size = New Size(btnActW, 25),
+                .BackColor = Color.FromArgb(220, 255, 200)
+            }
+            grpActions.Controls.Add(btnExtractPieces)
 
             ' 내차례 강제 지정 버튼
             btnForceMyTurn = New Button() With {
@@ -1156,7 +1166,7 @@ Namespace MacroAutoControl
                 Return
             End If
             Try
-                Dim exeDir = IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)
+                Dim exeDir = AppContext.BaseDirectory
                 Dim captureDir = IO.Path.Combine(exeDir, "Capture")
                 IO.Directory.CreateDirectory(captureDir)
                 Dim fileName = DateTime.Now.ToString("yyyy-MM-dd_HHmmss") & ".jpg"
@@ -1167,6 +1177,122 @@ Namespace MacroAutoControl
                 UpdateStatus($"스크린샷 저장 실패: {ex.Message}")
             Finally
                 bmp.Dispose()
+            End Try
+        End Sub
+
+        Private Sub btnExtractPieces_Click(sender As Object, e As EventArgs) Handles btnExtractPieces.Click
+            ' 현재 스크린샷 또는 드롭된 이미지에서 기물 추출
+            Dim bmp As Bitmap = Nothing
+            Try
+                If _isDroppedImage AndAlso _screenshot IsNot Nothing Then
+                    bmp = CType(_screenshot.Clone(), Bitmap)
+                ElseIf _targetWindow IsNot Nothing Then
+                    bmp = WindowFinder.CaptureWindow(_targetWindow.Handle)
+                End If
+                If bmp Is Nothing Then
+                    UpdateStatus("기물추출: 캡처된 이미지가 없습니다.")
+                    Return
+                End If
+
+                ' OpenCV Mat 변환
+                Dim mat = OpenCvSharp.Extensions.BitmapConverter.ToMat(bmp)
+                If mat.Channels() = 4 Then
+                    Dim bgr As New OpenCvSharp.Mat()
+                    OpenCvSharp.Cv2.CvtColor(mat, bgr, OpenCvSharp.ColorConversionCodes.BGRA2BGR)
+                    mat.Dispose()
+                    mat = bgr
+                End If
+
+                ' BoardRecognizer 초기화
+                If _boardRecognizer Is Nothing Then
+                    _boardRecognizer = New MacroAutoControl.Capture.BoardRecognizer()
+                    _boardRecognizer.LoadTemplates()
+                End If
+
+                ' 보드 인식
+                UpdateStatus("기물추출: 보드 인식 중...")
+                Application.DoEvents()
+
+                Dim board = _boardRecognizer.GetBoardState(mat)
+                If board Is Nothing Then
+                    UpdateStatus("기물추출: 보드 인식 실패 - 장기판을 찾을 수 없습니다")
+                    mat.Dispose()
+                    Return
+                End If
+
+                Dim gridPos = _boardRecognizer.GetGridPositions()
+                Dim cellSize = _boardRecognizer.GetCellSize()
+                If gridPos Is Nothing Then
+                    UpdateStatus("기물추출: 격자 정보 없음")
+                    mat.Dispose()
+                    Return
+                End If
+
+                ' 템플릿 디렉토리
+                Dim exeDir = AppContext.BaseDirectory
+                Dim templatesDir = IO.Path.Combine(exeDir, "templates")
+                IO.Directory.CreateDirectory(templatesDir)
+
+                ' 기존 변형 번호 중 최대값 찾기
+                Dim maxSuffix = 0
+                For Each f In IO.Directory.GetFiles(templatesDir, "*_*.png")
+                    Dim name = IO.Path.GetFileNameWithoutExtension(f)
+                    Dim parts = name.Split("_"c)
+                    If parts.Length = 2 Then
+                        Dim n As Integer
+                        If Integer.TryParse(parts(1), n) AndAlso n > maxSuffix Then maxSuffix = n
+                    End If
+                Next
+                Dim newSuffix = maxSuffix + 1
+
+                ' 각 기물 크롭 및 저장
+                Dim saved = 0
+                Dim half = 26
+                If cellSize.Item1 > 0 Then
+                    half = Math.Max(26, CInt(Math.Min(cellSize.Item1, cellSize.Item2) * 0.45))
+                End If
+
+                For r = 0 To 9
+                    For c = 0 To 8
+                        Dim piece = board.Grid(r)(c)
+                        If piece = MacroAutoControl.Constants.EMPTY Then Continue For
+
+                        ' 화면 좌표로 변환
+                        Dim screenR = _boardRecognizer.TranslateRow(r)
+                        Dim idx = screenR * 9 + c
+                        If idx < 0 OrElse idx >= gridPos.Length Then Continue For
+                        Dim cx = gridPos(idx)(0)
+                        Dim cy = gridPos(idx)(1)
+
+                        Dim x1 = Math.Max(0, cx - half)
+                        Dim y1 = Math.Max(0, cy - half)
+                        Dim x2 = Math.Min(mat.Cols, cx + half)
+                        Dim y2 = Math.Min(mat.Rows, cy + half)
+                        If x2 <= x1 OrElse y2 <= y1 Then Continue For
+
+                        Dim cellImg = mat(New OpenCvSharp.Rect(x1, y1, x2 - x1, y2 - y1))
+                        Dim resized As New OpenCvSharp.Mat()
+                        OpenCvSharp.Cv2.Resize(cellImg, resized, New OpenCvSharp.Size(52, 52))
+
+                        Dim savePath = IO.Path.Combine(templatesDir, $"{piece}_{newSuffix}.png")
+                        If Not IO.File.Exists(savePath) Then
+                            OpenCvSharp.Cv2.ImWrite(savePath, resized)
+                            saved += 1
+                        End If
+                        resized.Dispose()
+                    Next
+                Next
+
+                mat.Dispose()
+
+                ' BoardRecognizer 리셋 (새 템플릿 반영)
+                _boardRecognizer = Nothing
+
+                UpdateStatus($"기물추출 완료: {saved}개 저장 (접미사 _{newSuffix})")
+            Catch ex As Exception
+                UpdateStatus($"기물추출 실패: {ex.Message}")
+            Finally
+                bmp?.Dispose()
             End Try
         End Sub
 
