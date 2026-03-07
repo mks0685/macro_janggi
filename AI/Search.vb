@@ -39,9 +39,17 @@ Namespace MacroAutoControl.AI
         Private _gameMoves As List(Of ((Integer, Integer), (Integer, Integer)))
         Private Const MOVE_REPEAT_PENALTY As Integer = 500000
 
+        ' 디버그: 루트 레벨 수별 점수 기록
+        Public RootMoveScores As New List(Of (Move As ((Integer, Integer), (Integer, Integer)), Score As Integer, IsRepetition As Boolean))
+
         ''' <summary>외부에서 탐색 중단 요청</summary>
         Public Sub CancelSearch()
             _cancelRequested = True
+        End Sub
+
+        ''' <summary>TT(트랜스포지션 테이블) 초기화</summary>
+        Public Sub ClearTT()
+            _tt.Clear()
         End Sub
 
         Private Function TimeExpired() As Boolean
@@ -222,6 +230,7 @@ Namespace MacroAutoControl.AI
                 If board.IsRepetition(1) Then
                     Dim repScore = -(REPETITION_PENALTY - ply)
                     board.UndoMove()
+                    If ply = 0 Then RootMoveScores.Add((move, repScore, True))
                     If repScore > bestScore Then
                         bestScore = repScore
                         bestMove = move
@@ -266,6 +275,11 @@ Namespace MacroAutoControl.AI
                 End If
 
                 board.UndoMove()
+
+                ' 디버그: 루트 레벨 수별 점수 기록 (마지막 깊이만)
+                If ply = 0 Then
+                    RootMoveScores.Add((move, score, False))
+                End If
 
                 If score > bestScore Then
                     bestScore = score
@@ -383,6 +397,7 @@ Namespace MacroAutoControl.AI
             ' killers와 history 초기화
             _killers.Clear()
             _historyTable.Clear()
+            RootMoveScores.Clear()
 
             Dim bestMove As ((Integer, Integer), (Integer, Integer))? = Nothing
             Dim bestScore = 0
@@ -392,6 +407,7 @@ Namespace MacroAutoControl.AI
             ' Iterative Deepening
             For d = 1 To depth
                 If TimeExpired() Then Exit For
+                RootMoveScores.Clear() ' 매 깊이마다 초기화 → 마지막 깊이 결과만 남음
 
                 Dim score As Integer
 
@@ -403,12 +419,14 @@ Namespace MacroAutoControl.AI
                     score = Negamax(board, d, a, b, side, True, 0)
 
                     If score <= a OrElse score >= b Then
+                        RootMoveScores.Clear()
                         Dim window2 = window * 4
                         Dim a2 = prevScore - window2
                         Dim b2 = prevScore + window2
                         score = Negamax(board, d, a2, b2, side, True, 0)
 
                         If score <= a2 OrElse score >= b2 Then
+                            RootMoveScores.Clear()
                             score = Negamax(board, d, -INF, INF, side, True, 0)
                         End If
                     End If

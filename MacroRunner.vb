@@ -1435,19 +1435,10 @@ Namespace MacroAutoControl
                     Continue While
                 End If
 
-                ' 상위 3개 수 추출 (반복수 제외, 마지막 이동 기물 관련 수 가점)
-                Dim lastTo = bestMove.Item2 ' 내가 마지막으로 기물을 옮긴 도착지
+                ' 상위 3개 수 추출 (반복수 제외, 순수 점수 순)
                 Dim topMoves = Search.RootMoveScores _
                     .Where(Function(x) Not x.IsRepetition) _
-                    .OrderByDescending(Function(x)
-                                           Dim bonus = 0
-                                           ' 내 기물을 직접 잡는 수
-                                           If x.Move.Item2.Item1 = lastTo.Item1 AndAlso x.Move.Item2.Item2 = lastTo.Item2 Then bonus = 2000000
-                                           ' 도착지가 내 기물 근처 (맨해튼 거리 2 이내)
-                                           Dim dist = Math.Abs(x.Move.Item2.Item1 - lastTo.Item1) + Math.Abs(x.Move.Item2.Item2 - lastTo.Item2)
-                                           If dist <= 2 Then bonus = Math.Max(bonus, 1000000)
-                                           Return x.Score + bonus
-                                       End Function) _
+                    .OrderByDescending(Function(x) x.Score) _
                     .Take(3).ToList()
 
                 ' 대응수 탐색 시간: 무제한 (내 차례 감지 시 CancelSearch로 중단)

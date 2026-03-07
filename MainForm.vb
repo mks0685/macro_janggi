@@ -2011,22 +2011,10 @@ Namespace MacroAutoControl
 
                             board.UndoMove()
 
-                            ' 상위 3개 상대 예측수 추출 (빛나는 기물=마지막 이동 기물 기준 가점)
-                            Dim hlRow = If(highlighted.HasValue, highlighted.Value.Row, -99)
-                            Dim hlCol = If(highlighted.HasValue, highlighted.Value.Col, -99)
+                            ' 상위 3개 상대 예측수 추출 (순수 점수 순)
                             Dim topEnemyMoves = savedEnemyRootMoves _
                                 .Where(Function(x) Not x.IsRepetition) _
-                                .OrderByDescending(Function(x)
-                                                       Dim bonus = 0
-                                                       If hlRow >= 0 Then
-                                                           ' 마지막 기물을 직접 잡는 수
-                                                           If x.Move.Item2.Item1 = hlRow AndAlso x.Move.Item2.Item2 = hlCol Then bonus = 2000000
-                                                           ' 도착지가 마지막 기물 근처 (맨해튼 거리 2 이내)
-                                                           Dim dist = Math.Abs(x.Move.Item2.Item1 - hlRow) + Math.Abs(x.Move.Item2.Item2 - hlCol)
-                                                           If dist <= 2 Then bonus = Math.Max(bonus, 1000000)
-                                                       End If
-                                                       Return x.Score + bonus
-                                                   End Function) _
+                                .OrderByDescending(Function(x) x.Score) _
                                 .Take(3).ToList()
 
                             Dim preview2 = New Bitmap(_screenshot)
