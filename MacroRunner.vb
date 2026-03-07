@@ -18,6 +18,7 @@ Namespace MacroAutoControl
         Public Event ProgressChanged(currentIndex As Integer, totalCount As Integer, itemName As String, status As String, currentRepeat As Integer, totalRepeat As Integer)
         Public Event MacroCompleted(success As Boolean, message As String)
         Public Event AIMoveVisualize(screenshot As Bitmap, fromX As Integer, fromY As Integer, toX As Integer, toY As Integer, moveInfo As String)
+        Public Event AIPredictionVisualize(screenshot As Bitmap, predictions As List(Of PredictionEntry), predictionInfo As String)
         Public Event BoardPreviewUpdate(preview As Bitmap)
 
         Private _cancelRequested As Boolean
@@ -41,11 +42,40 @@ Namespace MacroAutoControl
         ' 동일구간 반복 금지를 위한 AI 수 히스토리 (from, to)
         Private _gameAIMoves As New List(Of ((Integer, Integer), (Integer, Integer)))
 
+        ' 예측 탐색 중 내 차례 감지 플래그
+        Private _predictionTurnDetected As Boolean = False
+
+        ' 예측 엔트리 (상대 예측수 + 대응수, 최대 3개)
+        Public Class PredictionEntry
+            Public EnemyFrom As (X As Integer, Y As Integer)    ' 픽셀
+            Public EnemyTo As (X As Integer, Y As Integer)
+            Public CounterFrom As (X As Integer, Y As Integer)   ' 픽셀
+            Public CounterTo As (X As Integer, Y As Integer)
+            Public EnemyPieceName As String
+            Public CounterPieceName As String
+            Public HasCounter As Boolean
+            Public EnemyBoardFrom As (Integer, Integer)          ' 보드 좌표
+            Public EnemyBoardTo As (Integer, Integer)
+            Public CounterBoardFrom As (Integer, Integer)
+            Public CounterBoardTo As (Integer, Integer)
+            Public CounterScore As Integer
+            Public EnemyScore As Integer
+        End Class
+        Private _predictions As New List(Of PredictionEntry)
+
         ' 내 차례 스크린샷 저장
         Private _watchDir As String = Nothing
         Private _watchDateDir As String = Nothing
         Private _watchCounter As Integer = 0
+        Private _watchGameNum As Integer = 0
         Private _watchPreviousBoard As Board = Nothing
+
+        ''' <summary>현재 대전 번호 (watch 폴더 번호)</summary>
+        Public ReadOnly Property WatchGameNum As Integer
+            Get
+                Return _watchGameNum
+            End Get
+        End Property
 
         ' 게임 결과 팝업 템플릿
         Private Shared ReadOnly TEMPLATES_DIR As String =
@@ -74,6 +104,9 @@ Namespace MacroAutoControl
 
         ' 내차례 강제 지정 플래그
         Private _forceMyTurn As Boolean = False
+
+        ' 예상수 사용 여부
+        Public Property EnablePrediction As Boolean = True
 
         ''' <summary>내 차례 대기를 강제로 건너뛰고 즉시 AI 탐색 진행</summary>
         Public Sub ForceMyTurn()
@@ -122,6 +155,66 @@ Namespace MacroAutoControl
                 Return Constants.CHO
             End If
         End Function
+
+        Private Sub ClearPrediction()
+            _predictions.Clear()
+        End Sub
+
+        Private Sub DrawPredictionOverlay(g As Graphics)
+            If _predictions.Count = 0 Then Return
+
+            ' 2~3순위: 회색 점선 화살표 + 출발지 순위 번호
+            For i = _predictions.Count - 1 To 1 Step -1
+                Dim p = _predictions(i)
+                Dim ef2 = p.EnemyFrom, et2 = p.EnemyTo
+                Using pen As New Pen(Color.FromArgb(180, 0, 180, 255), 2.5F)
+                    pen.DashStyle = Drawing2D.DashStyle.Dot
+                    pen.CustomEndCap = New Drawing2D.AdjustableArrowCap(6, 6)
+                    g.DrawLine(pen, ef2.X, ef2.Y, et2.X, et2.Y)
+                End Using
+                DrawRankNumber(g, i + 1, ef2.X, ef2.Y, Color.FromArgb(220, 0, 180, 255), 9)
+            Next
+
+            ' 1순위: 주황 점선 화살표 + 출발지 순위 번호
+            Dim pred = _predictions(0)
+            Dim efMain = pred.EnemyFrom, etMain = pred.EnemyTo
+            Using brush As New SolidBrush(Color.FromArgb(60, 0, 180, 255))
+                g.FillEllipse(brush, efMain.X - 22, efMain.Y - 22, 44, 44)
+            End Using
+            Using pen As New Pen(Color.FromArgb(200, 0, 180, 255), 2)
+                pen.DashStyle = Drawing2D.DashStyle.Dash
+                g.DrawEllipse(pen, efMain.X - 22, efMain.Y - 22, 44, 44)
+            End Using
+            Using pen As New Pen(Color.FromArgb(200, 0, 180, 255), 3)
+                pen.DashStyle = Drawing2D.DashStyle.Dash
+                pen.CustomEndCap = New Drawing2D.AdjustableArrowCap(6, 6)
+                g.DrawLine(pen, efMain.X, efMain.Y, etMain.X, etMain.Y)
+            End Using
+            DrawRankNumber(g, 1, efMain.X, efMain.Y, Color.FromArgb(220, 0, 180, 255), 11)
+        End Sub
+
+        ''' <summary>
+        ''' 기물 위에 순위 번호를 원형 배지로 표시
+        ''' </summary>
+        Private Sub DrawRankNumber(g As Graphics, rank As Integer, x As Integer, y As Integer, badgeColor As Color, fontSize As Single)
+            Dim rankStr = rank.ToString()
+            Using font As New Font("Arial", fontSize, FontStyle.Bold)
+                Dim sz = g.MeasureString(rankStr, font)
+                Dim badgeSize = Math.Max(sz.Width, sz.Height) + 4
+                Dim bx = x - badgeSize / 2, by = y - badgeSize / 2
+                ' 배경 원
+                Using bg As New SolidBrush(Color.FromArgb(220, 0, 0, 0))
+                    g.FillEllipse(bg, bx, by, badgeSize, badgeSize)
+                End Using
+                Using pen As New Pen(badgeColor, 1.5F)
+                    g.DrawEllipse(pen, bx, by, badgeSize, badgeSize)
+                End Using
+                ' 숫자
+                Using textBrush As New SolidBrush(badgeColor)
+                    g.DrawString(rankStr, font, textBrush, x - sz.Width / 2, y - sz.Height / 2)
+                End Using
+            End Using
+        End Sub
 
         ''' <summary>
         ''' BoardRecognizer.DetectHighlightedPiece를 사용하여 내 차례인지 판정.
@@ -475,6 +568,9 @@ Namespace MacroAutoControl
                                     g.DrawString(summary, font, textBrush, 8, 6)
                                 End Using
                             End Using
+
+                            ' 예측수/대응수 오버레이 표시
+                            DrawPredictionOverlay(g)
                         End Using
                         RaiseEvent BoardPreviewUpdate(preview)
                         Application.DoEvents()
@@ -717,6 +813,7 @@ Namespace MacroAutoControl
                                 _gameHashHistory.Clear()
                     _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
+                    ClearPrediction()
                                 RaiseEvent ProgressChanged(0, items.Count, "", $"게임 종료 → 재시작 대기 (3초)...", currentRepeat, totalRepeat)
                                 Application.DoEvents()
                                 Dim w = 0
@@ -929,6 +1026,7 @@ Namespace MacroAutoControl
                     _gameHashHistory.Clear()
                     _gameAIMoves.Clear()
                     _watchPreviousBoard = Nothing
+                    ClearPrediction()
                     Return False  ' 다음 매크로 항목으로
                 End If
                 Return False
@@ -1007,66 +1105,124 @@ Namespace MacroAutoControl
                 Application.DoEvents()
             End If
 
-            ' 3. AI 최적수 계산
+            ' 3. 예측 일치 확인 → 일치 시 즉시 실행, 불일치 시 정상 탐색
+            Dim usePrediction = False
+            Dim predScore As Integer = 0
+            Dim bestMove As ((Integer, Integer), (Integer, Integer))
+            Dim resultScore As Integer = 0
+            Dim resultDepth As Integer = 0
             Dim sideText = If(aiSide = Constants.CHO, "초", "한")
-            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: {sideText} 탐색 중 (깊이:{item.AIDepth}, 시간:{item.AITime:F0}s)...", currentRepeat, totalRepeat)
-            Application.DoEvents()
 
-            ' 게임 수준 해시 히스토리 주입 (동일구간 반복 금지)
-            _gameHashHistory.Add(board.ZobristHash)
-            board.InjectGameHistory(_gameHashHistory)
+            If EnablePrediction AndAlso _predictions.Count > 0 Then
+                Dim enemySideVal = If(aiSide = Constants.CHO, Constants.HAN, Constants.CHO)
 
-            Dim result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime, _gameAIMoves)
+                For predIdx = 0 To _predictions.Count - 1
+                    Dim pred = _predictions(predIdx)
+                    If Not pred.HasCounter Then Continue For
 
-            If Not result.BestMove.HasValue Then
-                capturedBmp?.Dispose()
-                Dim retryDelay = Math.Max(1000, item.DelayAfterClick)
-                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → {retryDelay / 1000.0:F1}초 후 재시도...", currentRepeat, totalRepeat)
-                Application.DoEvents()
-                Dim rd = 0
-                While rd < retryDelay AndAlso Not _cancelRequested
-                    Thread.Sleep(100)
-                    rd += 100
-                    Application.DoEvents()
-                End While
-                If _cancelRequested Then Return False
+                    Dim et = pred.EnemyBoardTo
+                    Dim cf = pred.CounterBoardFrom
+                    Dim ct = pred.CounterBoardTo
 
-                ' 재캡처 + 재인식 + 재탐색
-                Dim ss = WindowFinder.CaptureWindow(targetWindow.Handle)
-                If ss IsNot Nothing Then
-                    Dim m As Mat = Nothing
-                    Try
-                        m = BitmapConverter.ToMat(ss)
-                        If m.Channels() = 4 Then
-                            Dim bgr As New Mat()
-                            Cv2.CvtColor(m, bgr, ColorConversionCodes.BGRA2BGR)
-                            m.Dispose()
-                            m = bgr
-                        End If
-                        Dim retryBoard = recognizer.GetBoardState(m)
-                        If retryBoard IsNot Nothing Then
-                            board = retryBoard
-                            board.InjectGameHistory(_gameHashHistory)
-                            result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime, _gameAIMoves)
-                        End If
-                    Catch
-                    Finally
-                        m?.Dispose()
-                        ss.Dispose()
-                    End Try
-                End If
+                    ' 이미지 인식 결과만으로 검증: 상대 기물이 예측 도착지에 있는지
+                    Dim enemyArrived = (board.Grid(et.Item1)(et.Item2) <> EMPTY AndAlso
+                                        board.Grid(et.Item1)(et.Item2).StartsWith(enemySideVal))
 
-                If Not result.BestMove.HasValue Then
-                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 다음", currentRepeat, totalRepeat)
-                    _recognizer?.ResetGrid()
-                    _gameHashHistory.Clear()
-                    _gameAIMoves.Clear()
-                    _watchPreviousBoard = Nothing
-                    Return False  ' 다음 매크로 항목으로
-                End If
+                    If enemyArrived Then
+                        bestMove = (cf, ct)
+                        predScore = pred.CounterScore
+                        usePrediction = True
+                        RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                            $"AI: 예측 {predIdx + 1}순위 일치 → 대응수 즉시 실행 (점수:{pred.CounterScore})", currentRepeat, totalRepeat)
+                        Application.DoEvents()
+
+                        ' 예측 대응수 사용 로그 저장
+                        Try
+                            Dim logDir = "D:\images\macro_janggi\log"
+                            IO.Directory.CreateDirectory(logDir)
+                            Dim logPath = IO.Path.Combine(logDir, $"{DateTime.Now.ToString("yyyy-MM-dd")}_{_watchGameNum:D3}_plan.txt")
+                            Using sw As New IO.StreamWriter(logPath, True)
+                                sw.WriteLine($"=== 예측 일치 ({DateTime.Now.ToString("HH:mm:ss")}) ===")
+                                sw.WriteLine($"  일치 순위: {predIdx + 1}순위")
+                                sw.WriteLine($"  상대 수: {pred.EnemyPieceName} ({pred.EnemyBoardFrom.Item1},{pred.EnemyBoardFrom.Item2})→({pred.EnemyBoardTo.Item1},{pred.EnemyBoardTo.Item2}) 점수:{pred.EnemyScore}")
+                                Dim cPn = pred.CounterPieceName
+                                sw.WriteLine($"  대응수: {cPn} ({cf.Item1},{cf.Item2})→({ct.Item1},{ct.Item2}) 점수:{pred.CounterScore}")
+                                sw.WriteLine()
+                            End Using
+                        Catch
+                        End Try
+
+                        Exit For
+                    End If
+                Next
             End If
 
-            Dim bestMove = result.BestMove.Value
+            ClearPrediction()
+
+            If Not usePrediction Then
+                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: {sideText} 탐색 중 (깊이:{item.AIDepth}, 시간:{item.AITime:F0}s)...", currentRepeat, totalRepeat)
+                Application.DoEvents()
+
+                Search.ClearTT()
+
+                Dim result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
+
+                If Not result.BestMove.HasValue Then
+                    capturedBmp?.Dispose()
+                    Dim retryDelay = Math.Max(1000, item.DelayAfterClick)
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → {retryDelay / 1000.0:F1}초 후 재시도...", currentRepeat, totalRepeat)
+                    Application.DoEvents()
+                    Dim rd = 0
+                    While rd < retryDelay AndAlso Not _cancelRequested
+                        Thread.Sleep(100)
+                        rd += 100
+                        Application.DoEvents()
+                    End While
+                    If _cancelRequested Then Return False
+
+                    ' 재캡처 + 재인식 + 재탐색
+                    Dim ss = WindowFinder.CaptureWindow(targetWindow.Handle)
+                    If ss IsNot Nothing Then
+                        Dim m As Mat = Nothing
+                        Try
+                            m = BitmapConverter.ToMat(ss)
+                            If m.Channels() = 4 Then
+                                Dim bgr As New Mat()
+                                Cv2.CvtColor(m, bgr, ColorConversionCodes.BGRA2BGR)
+                                m.Dispose()
+                                m = bgr
+                            End If
+                            Dim retryBoard = recognizer.GetBoardState(m)
+                            If retryBoard IsNot Nothing Then
+                                board = retryBoard
+                                Search.ClearTT()
+                                result = Search.FindBestMove(board, aiSide, item.AIDepth, item.AITime)
+                            End If
+                        Catch
+                        Finally
+                            m?.Dispose()
+                            ss.Dispose()
+                        End Try
+                    End If
+
+                    If Not result.BestMove.HasValue Then
+                        RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"착수 불가 → 다음", currentRepeat, totalRepeat)
+                        _recognizer?.ResetGrid()
+                        _gameHashHistory.Clear()
+                        _gameAIMoves.Clear()
+                        _watchPreviousBoard = Nothing
+                        ClearPrediction()
+                        Return False  ' 다음 매크로 항목으로
+                    End If
+                End If
+
+                bestMove = result.BestMove.Value
+                resultScore = result.Score
+                resultDepth = result.Depth
+            Else
+                resultScore = predScore
+                resultDepth = item.AIDepth
+            End If
             Dim fromRow = bestMove.Item1.Item1
             Dim fromCol = bestMove.Item1.Item2
             Dim toRow = bestMove.Item2.Item1
@@ -1162,7 +1318,8 @@ Namespace MacroAutoControl
                 BoardRecognizer.PIECE_NAMES.TryGetValue(capturedPiece, capName)
                 captureInfo = $" (잡기:{capName})"
             End If
-            Dim moveInfo = $"{sideText} {pieceName} ({fromRow},{fromCol})→({toRow},{toCol}){captureInfo} | 점수:{result.Score} 깊이:{result.Depth}"
+            Dim predTag = If(usePrediction, " [예측]", "")
+            Dim moveInfo = $"{sideText} {pieceName} ({fromRow},{fromCol})→({toRow},{toCol}){captureInfo} | 점수:{resultScore} 깊이:{resultDepth}{predTag}"
 
             RaiseEvent AIMoveVisualize(capturedBmp, fromScreenX, fromScreenY, toScreenX, toScreenY, moveInfo)
             Application.DoEvents()
@@ -1186,19 +1343,259 @@ Namespace MacroAutoControl
             ' AI 수 히스토리에 기록 (동일구간 반복 방지)
             _gameAIMoves.Add((bestMove.Item1, bestMove.Item2))
 
-            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 차례 대기...", currentRepeat, totalRepeat)
+            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 예측 중...", currentRepeat, totalRepeat)
+            Application.DoEvents()
+
+            ' ── 상대 예측수 + 대응수 미리 계산 (내 차례 감지 시 즉시 취소) ──
+            If Not EnablePrediction Then
+                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 ({moveInfo}) → 상대 차례 대기...", currentRepeat, totalRepeat)
+                Application.DoEvents()
+                capturedBmp?.Dispose()
+                Dim dw2 = 0
+                While dw2 < 1000 AndAlso Not _cancelRequested
+                    Thread.Sleep(100)
+                    dw2 += 100
+                    Application.DoEvents()
+                End While
+                Continue While
+            End If
+            _predictionTurnDetected = False
+            Dim predictionUndoCount = 0
+            Try
+                Dim enemySide = If(aiSide = Constants.CHO, Constants.HAN, Constants.CHO)
+                Dim enemySideText = If(enemySide = Constants.CHO, "초", "한")
+                Dim twHandle = targetWindow.Handle
+                Dim predAiSide = aiSide
+
+                ' 예측 탐색 시간: 메인 탐색의 1/3 (최소 3초, 최대 10초)
+                Dim predTime = Math.Max(3.0, Math.Min(10.0, item.AITime / 3.0))
+
+                ' 백그라운드 스레드: 예측 탐색 중 내 차례 감지 시 즉시 탐색 취소
+                Dim monitorThread As New Thread(
+                    Sub()
+                        Thread.Sleep(1000) ' 내 수 클릭 직후 안정화 대기
+                        While Not _predictionTurnDetected AndAlso Not _cancelRequested
+                            Try
+                                Dim ss = WindowFinder.CaptureWindow(twHandle)
+                                If ss IsNot Nothing Then
+                                    Dim m As Mat = Nothing
+                                    Try
+                                        m = BitmapConverter.ToMat(ss)
+                                        If m.Channels() = 4 Then
+                                            Dim bgr5 As New Mat()
+                                            Cv2.CvtColor(m, bgr5, ColorConversionCodes.BGRA2BGR)
+                                            m.Dispose()
+                                            m = bgr5
+                                        End If
+                                        Dim chkBoard = recognizer.GetBoardState(m)
+                                        If chkBoard IsNot Nothing Then
+                                            Dim chkGridPos = recognizer.GetGridPositions()
+                                            Dim chkCellSize = recognizer.GetCellSize()
+                                            If chkGridPos IsNot Nothing Then
+                                                Dim glowInfo As String = Nothing
+                                                Dim myTurn = HasGlowAroundMyPieces(m, chkBoard, chkGridPos, predAiSide,
+                                                                                    chkCellSize.Item1, chkCellSize.Item2,
+                                                                                    recognizer.IsBoardFlipped, targetWindow, glowInfo)
+                                                If myTurn Then
+                                                    _predictionTurnDetected = True
+                                                    Search.CancelSearch() ' 예측 탐색 즉시 중단 (결과는 버림)
+                                                    Exit While
+                                                End If
+                                            End If
+                                        End If
+                                    Finally
+                                        m?.Dispose()
+                                        ss.Dispose()
+                                    End Try
+                                End If
+                            Catch
+                            End Try
+                            Thread.Sleep(500)
+                        End While
+                    End Sub)
+                monitorThread.IsBackground = True
+                monitorThread.Start()
+
+                ' TT 초기화 (이전 탐색의 잔여 엔트리가 예측 탐색을 오염시키지 않도록)
+                Search.ClearTT()
+
+                ' 내 수 적용 후 상대 최적수 탐색
+                board.MakeMove(bestMove.Item1, bestMove.Item2)
+                predictionUndoCount = 1
+                Dim predResult = Search.FindBestMove(board, enemySide, item.AIDepth, predTime)
+
+                ' 내 차례 감지됨 → 예측 건너뛰고 즉시 메인 루프로
+                If _predictionTurnDetected Then
+                    board.UndoMove()
+                    predictionUndoCount = 0
+                    monitorThread.Join(1000)
+                    capturedBmp?.Dispose()
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 예측 완료 후 내 차례 감지 → 즉시 탐색...", currentRepeat, totalRepeat)
+                    Application.DoEvents()
+                    Continue While
+                End If
+
+                ' 상위 3개 수 추출 (반복수 제외, 마지막 이동 기물 관련 수 가점)
+                Dim lastTo = bestMove.Item2 ' 내가 마지막으로 기물을 옮긴 도착지
+                Dim topMoves = Search.RootMoveScores _
+                    .Where(Function(x) Not x.IsRepetition) _
+                    .OrderByDescending(Function(x)
+                                           Dim bonus = 0
+                                           ' 내 기물을 직접 잡는 수
+                                           If x.Move.Item2.Item1 = lastTo.Item1 AndAlso x.Move.Item2.Item2 = lastTo.Item2 Then bonus = 2000000
+                                           ' 도착지가 내 기물 근처 (맨해튼 거리 2 이내)
+                                           Dim dist = Math.Abs(x.Move.Item2.Item1 - lastTo.Item1) + Math.Abs(x.Move.Item2.Item2 - lastTo.Item2)
+                                           If dist <= 2 Then bonus = Math.Max(bonus, 1000000)
+                                           Return x.Score + bonus
+                                       End Function) _
+                    .Take(3).ToList()
+
+                ' 대응수 탐색 시간: 무제한 (내 차례 감지 시 CancelSearch로 중단)
+                Dim counterTime = 9999.0
+
+                If topMoves.Count > 0 AndAlso gridPos IsNot Nothing Then
+                    Dim predInfoParts As New List(Of String)
+
+                    For tmIdx = 0 To topMoves.Count - 1
+                        Dim tm = topMoves(tmIdx)
+                        Dim eMove = tm.Move
+                        Dim eFr = eMove.Item1.Item1, eFc = eMove.Item1.Item2
+                        Dim eTr = eMove.Item2.Item1, eTc = eMove.Item2.Item2
+                        Dim eActFr = recognizer.TranslateRow(eFr)
+                        Dim eActTr = recognizer.TranslateRow(eTr)
+                        Dim eFrX = gridPos(eActFr * BOARD_COLS + eFc)(0)
+                        Dim eFrY = gridPos(eActFr * BOARD_COLS + eFc)(1)
+                        Dim eTrX = gridPos(eActTr * BOARD_COLS + eTc)(0)
+                        Dim eTrY = gridPos(eActTr * BOARD_COLS + eTc)(1)
+
+                        Dim ePieceName = ""
+                        BoardRecognizer.PIECE_NAMES.TryGetValue(board.Grid(eFr)(eFc), ePieceName)
+
+                        ' 진행 표시
+                        RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                            $"AI: 예측 {tmIdx + 1}순위({ePieceName}) 대응수 탐색 중...", currentRepeat, totalRepeat)
+                        Application.DoEvents()
+
+                        ' 상대 예측수 적용 → 대응수 탐색
+                        board.MakeMove(eMove.Item1, eMove.Item2)
+                        predictionUndoCount = 2
+                        Search.ClearTT()
+                        Dim counterResult = Search.FindBestMove(board, aiSide, item.AIDepth, counterTime)
+                        board.UndoMove() ' 상대 예측수 되돌리기
+                        predictionUndoCount = 1
+
+                        ' 대응수 탐색 완료 후 내 차례 감지 → 즉시 메인 루프로
+                        If _predictionTurnDetected Then
+                            board.UndoMove()
+                            predictionUndoCount = 0
+                            monitorThread.Join(1000)
+                            capturedBmp?.Dispose()
+                            RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 대응수 완료 후 내 차례 감지 → 즉시 탐색...", currentRepeat, totalRepeat)
+                            Application.DoEvents()
+                            GoTo ContinueMainLoop
+                        End If
+
+                        Dim entry As New PredictionEntry()
+                        entry.EnemyFrom = (eFrX, eFrY)
+                        entry.EnemyTo = (eTrX, eTrY)
+                        entry.EnemyPieceName = ePieceName
+                        entry.EnemyScore = tm.Score
+                        entry.EnemyBoardFrom = (eFr, eFc)
+                        entry.EnemyBoardTo = (eTr, eTc)
+
+                        Dim hasCtr = counterResult.BestMove.HasValue
+                        entry.HasCounter = hasCtr
+                        Dim counterInfo = ""
+
+                        If hasCtr Then
+                            Dim cMove = counterResult.BestMove.Value
+                            Dim cFr = cMove.Item1.Item1, cFc = cMove.Item1.Item2
+                            Dim cTr = cMove.Item2.Item1, cTc = cMove.Item2.Item2
+                            Dim cActFr = recognizer.TranslateRow(cFr)
+                            Dim cActTr = recognizer.TranslateRow(cTr)
+                            Dim cFrX = gridPos(cActFr * BOARD_COLS + cFc)(0)
+                            Dim cFrY = gridPos(cActFr * BOARD_COLS + cFc)(1)
+                            Dim cTrX = gridPos(cActTr * BOARD_COLS + cTc)(0)
+                            Dim cTrY = gridPos(cActTr * BOARD_COLS + cTc)(1)
+                            Dim cPieceName = ""
+                            BoardRecognizer.PIECE_NAMES.TryGetValue(board.Grid(cMove.Item1.Item1)(cMove.Item1.Item2), cPieceName)
+
+                            entry.CounterFrom = (cFrX, cFrY)
+                            entry.CounterTo = (cTrX, cTrY)
+                            entry.CounterPieceName = cPieceName
+                            entry.CounterBoardFrom = (cMove.Item1.Item1, cMove.Item1.Item2)
+                            entry.CounterBoardTo = (cMove.Item2.Item1, cMove.Item2.Item2)
+                            entry.CounterScore = counterResult.Score
+                            counterInfo = $"→대응:{cPieceName}"
+                        End If
+
+                        _predictions.Add(entry)
+                        predInfoParts.Add($"예측{tmIdx + 1}:{ePieceName} 점수:{tm.Score} {counterInfo}")
+                    Next
+
+                    ' 예측 로그 저장
+                    Try
+                        Dim logDir = "D:\images\macro_janggi\log"
+                        IO.Directory.CreateDirectory(logDir)
+                        Dim planPath = IO.Path.Combine(logDir, $"{DateTime.Now.ToString("yyyy-MM-dd")}_{_watchGameNum:D3}_plan.txt")
+                        Using sw As New IO.StreamWriter(planPath, True)
+                            sw.WriteLine($"=== 예측 ({DateTime.Now.ToString("HH:mm:ss")}) 내수: {sideText} ({bestMove.Item1.Item1},{bestMove.Item1.Item2})→({bestMove.Item2.Item1},{bestMove.Item2.Item2}) ===")
+                            For pi = 0 To _predictions.Count - 1
+                                Dim p = _predictions(pi)
+                                Dim cInfo = ""
+                                If p.HasCounter Then
+                                    cInfo = $" → 대응:{p.CounterPieceName} ({p.CounterBoardFrom.Item1},{p.CounterBoardFrom.Item2})→({p.CounterBoardTo.Item1},{p.CounterBoardTo.Item2}) 점수:{p.CounterScore}"
+                                End If
+                                sw.WriteLine($"  {pi + 1}순위: {p.EnemyPieceName} ({p.EnemyBoardFrom.Item1},{p.EnemyBoardFrom.Item2})→({p.EnemyBoardTo.Item1},{p.EnemyBoardTo.Item2}) 점수:{p.EnemyScore}{cInfo}")
+                            Next
+                            sw.WriteLine()
+                        End Using
+                    Catch
+                    End Try
+
+                    ' 예측수 시각화 이벤트 (전체 순위)
+                    Dim predBmp = WindowFinder.CaptureWindow(targetWindow.Handle)
+                    If predBmp Is Nothing Then predBmp = If(capturedBmp IsNot Nothing, New Bitmap(capturedBmp), Nothing)
+                    If predBmp IsNot Nothing Then
+                        Dim vizInfo = String.Join(" | ", predInfoParts)
+                        RaiseEvent AIPredictionVisualize(predBmp, _predictions, vizInfo)
+                        Application.DoEvents()
+                    End If
+
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name,
+                        $"AI: {String.Join(" | ", predInfoParts)} → 상대 차례 대기...", currentRepeat, totalRepeat)
+                Else
+                    RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 → 상대 차례 대기...", currentRepeat, totalRepeat)
+                End If
+                board.UndoMove() ' 내 수 되돌리기
+                predictionUndoCount = 0
+
+                ' 모니터 스레드 종료 대기
+                _predictionTurnDetected = True ' 모니터 종료 신호
+                monitorThread.Join(2000)
+            Catch ex As Exception
+                ' 예외 발생 시 보드 원복
+                For i = 1 To predictionUndoCount
+                    Try : board.UndoMove() : Catch : End Try
+                Next
+                RaiseEvent ProgressChanged(index + 1, totalCount, item.Name, $"AI: 수 완료 → 상대 차례 대기...", currentRepeat, totalRepeat)
+            End Try
             Application.DoEvents()
 
             capturedBmp?.Dispose()
 
-            ' AI 수 실행 후 대기 (1초) → 재캡처 진행
-            Dim dw = 0
-            While dw < 1000 AndAlso Not _cancelRequested
-                Thread.Sleep(100)
-                dw += 100
-                Application.DoEvents()
-            End While
+            ' 내 차례 이미 감지된 경우 대기 없이 즉시 진행
+            If Not _predictionTurnDetected Then
+                ' AI 수 실행 후 대기 (1초) → 재캡처 진행
+                Dim dw = 0
+                While dw < 1000 AndAlso Not _cancelRequested
+                    Thread.Sleep(100)
+                    dw += 100
+                    Application.DoEvents()
+                End While
+            End If
 
+ContinueMainLoop:
             End While ' 다시 WaitForMyTurn부터
             Return False
         End Function
@@ -1469,7 +1866,8 @@ Namespace MacroAutoControl
                             If num > maxNum Then maxNum = num
                         End If
                     Next
-                    _watchDir = IO.Path.Combine(_watchDateDir, (maxNum + 1).ToString("D3"))
+                    _watchGameNum = maxNum + 1
+                    _watchDir = IO.Path.Combine(_watchDateDir, _watchGameNum.ToString("D3"))
                     IO.Directory.CreateDirectory(_watchDir)
                     Console.WriteLine($"[알림] 스크린샷 저장 폴더: {_watchDir}")
                 End If
