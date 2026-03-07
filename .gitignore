@@ -11,3 +11,9 @@ obj/
 
 # Windows nul device artifact
 nul
+
+# IDE settings
+.vs/
+
+# Publish output
+publish/
